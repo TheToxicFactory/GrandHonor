@@ -89,6 +89,8 @@ Colour settings use HONOR's own values measured for this panel and work in every
 
 ## 🧰 Drivers
 
+<img src="images/drivers.png" width="380" align="right" alt="Drivers tab">
+
 - **Check for driver updates** asks HONOR for drivers and BIOS for this exact laptop. Each package is verified (signature, SHA-256) before it can run; you can also save it.
 - **Install BIOS** works only on the charger with at least 30 % battery. Keep the laptop on: it restarts by itself.
 - **Driver backup** — **Export** saves all installed drivers to an archive, **Import** puts them back.
@@ -98,6 +100,8 @@ Colour settings use HONOR's own values measured for this panel and work in every
   - **Restart Bluetooth** or **Restart Wi-Fi** when a device will not connect (click twice: the connection drops for a few seconds).
   - **Scan for hardware changes**, as in Device Manager.
   - **System report** copies the model, BIOS, Windows version, battery, SSD, devices and the event log — attach it when you report a problem. **Event log** opens the log file.
+
+<br clear="right">
 
 ---
 
