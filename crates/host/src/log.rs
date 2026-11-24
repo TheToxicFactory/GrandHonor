@@ -1,5 +1,4 @@
-use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::fs;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 use windows::Win32::System::SystemInformation::GetLocalTime;
@@ -36,14 +35,14 @@ fn write_entry(level: &str, message: &str) {
         return;
     };
     let path = log_path();
-    if let Some(parent) = path.parent() {
-        let _ = fs::create_dir_all(parent);
+    // The log folder is the user's and the host is elevated: no writes through links.
+    if path.parent().is_none_or(|dir| crate::safe_fs::prepare_dir(dir).is_err()) {
+        return;
     }
-    if let Ok(meta) = fs::metadata(path)
+    if let Ok(meta) = fs::symlink_metadata(path)
         && meta.len() > MAX_LOG_BYTES
     {
-        let backup = path.with_extension("log.1");
-        let _ = fs::rename(path, backup);
+        let _ = crate::safe_fs::rename(path, &path.with_extension("log.1"));
     }
     let st = unsafe { GetLocalTime() };
     let line = format!(
@@ -58,7 +57,5 @@ fn write_entry(level: &str, message: &str) {
         level,
         message
     );
-    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
-        let _ = file.write_all(line.as_bytes());
-    }
+    let _ = crate::safe_fs::append(path, line.as_bytes());
 }

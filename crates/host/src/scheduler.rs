@@ -149,7 +149,7 @@ pub fn is_installation_path() -> bool {
         .eq_ignore_ascii_case(&expected.to_string_lossy())
 }
 
-fn is_path_protected(path: &Path) -> bool {
+pub fn is_path_protected(path: &Path) -> bool {
     let wide = HSTRING::from(path.as_os_str());
     let attrs = unsafe { GetFileAttributesW(&wide) };
     if attrs == INVALID_FILE_ATTRIBUTES || (attrs & FILE_ATTRIBUTE_REPARSE_POINT.0) != 0 {

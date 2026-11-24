@@ -12,8 +12,10 @@ mod presets;
 mod report;
 mod scheduler;
 mod settings;
+mod safe_fs;
 mod settings_transfer;
 mod tray;
+mod unelevated;
 mod updater;
 mod verify;
 

@@ -45,7 +45,7 @@ const GUID_CONSOLE_DISPLAY_STATE: windows_core::GUID =
     windows_core::GUID::from_u128(0x6fe69556_704a_47a0_8f24_c28d936fda47);
 use windows::Win32::UI::Shell::{
     NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP, NIIF_INFO, NIM_ADD, NIM_DELETE, NIM_MODIFY,
-    NOTIFYICONDATAW, Shell_NotifyIconW, ShellExecuteW,
+    NOTIFYICONDATAW, Shell_NotifyIconW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateIconIndirect, CreateWindowExW, DBT_DEVICEARRIVAL, DBT_DEVICEREMOVECOMPLETE,
@@ -54,7 +54,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetMessageW, GetSystemMetrics, HDEVNOTIFY, HICON, ICONINFO, KillTimer, MSG,
     PBT_APMPOWERSTATUSCHANGE, PBT_APMRESUMEAUTOMATIC, PBT_APMRESUMESUSPEND, PBT_APMSUSPEND,
     PBT_POWERSETTINGCHANGE, PostMessageW, PostQuitMessage, RegisterClassExW,
-    RegisterDeviceNotificationW, RegisterWindowMessageW, SM_CXSMICON, SW_SHOWNORMAL, SetTimer,
+    RegisterDeviceNotificationW, RegisterWindowMessageW, SM_CXSMICON, SetTimer,
     TranslateMessage, UnregisterDeviceNotification, WM_APP, WM_CLOSE, WM_DESTROY, WM_DEVICECHANGE,
     WM_LBUTTONUP, WM_MOUSEMOVE, WM_POWERBROADCAST, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_TIMER,
     WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
@@ -482,18 +482,8 @@ fn handle_oem_event(rt: &Arc<AppRuntime>, event: OemEvent) {
             }
         }
         OemEvent::ScreenshotKeyPressed => {
-            let verb = HSTRING::from("open");
-            let uri = HSTRING::from("ms-screenclip:");
-            unsafe {
-                let _ = ShellExecuteW(
-                    None,
-                    &verb,
-                    &uri,
-                    None,
-                    None,
-                    SW_SHOWNORMAL,
-                );
-            }
+            // As the user: the protocol handler may come from HKCU (see unelevated.rs).
+            crate::unelevated::open("ms-screenclip:");
         }
         OemEvent::Charger(notice) => {
             use crate::hw::events::ChargerNotice;
@@ -627,12 +617,9 @@ fn run_key_action(rt: &Arc<AppRuntime>, key: &'static str) {
             notice(rt, Icon::Display, text, None);
         }
         Action::App => {
-            if let Some(path) = settings::key_app(key) {
-                let verb = HSTRING::from("open");
-                let file = HSTRING::from(path.as_str());
-                unsafe {
-                    let _ = ShellExecuteW(None, &verb, &file, None, None, SW_SHOWNORMAL);
-                }
+            // The path comes from a user-writable setting: start it as the user, never elevated.
+            if let Some(path) = settings::key_app(key).filter(|p| crate::unelevated::is_launchable_program(p)) {
+                crate::unelevated::open(&path);
             }
         }
     }

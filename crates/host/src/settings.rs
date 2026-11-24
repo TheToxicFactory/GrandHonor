@@ -689,12 +689,8 @@ pub mod store {
     }
 
     fn write_file(values: &BTreeMap<String, StoredValue>) -> bool {
-        let file = path();
-        if let Some(dir) = file.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        let tmp = file.with_extension("json.tmp");
-        std::fs::write(&tmp, render(values)).is_ok() && std::fs::rename(&tmp, &file).is_ok()
+        // The host is elevated and this folder is the user's: never write through a link.
+        crate::safe_fs::write_atomic(&path(), render(values).as_bytes()).is_ok()
     }
 
     /// Loads the file; migrates from the registry when it does not exist yet, and recovers
@@ -705,7 +701,7 @@ pub mod store {
             Ok(text) => match parse(&text) {
                 Some(values) => return values,
                 None => {
-                    let _ = std::fs::rename(&file, file.with_extension("json.broken"));
+                    let _ = crate::safe_fs::rename(&file, &file.with_extension("json.broken"));
                     crate::log::error("settings.json was unreadable; restored from the registry copy");
                 }
             },

@@ -12,7 +12,7 @@
 
 use crate::drivers::http::{download_to_file_with, get_text};
 use crate::drivers::trust::compute_sha256_hex;
-use crate::scheduler::{create_protected_directory, install_root, is_installation_path};
+use crate::scheduler::{create_protected_directory, install_root, is_installation_path, is_path_protected};
 use grandhonor_core::url_guard::validate_update_redirect;
 use grandhonor_core::version::is_newer_version;
 use std::path::{Path, PathBuf};
@@ -23,6 +23,8 @@ use windows::Win32::Foundation::CloseHandle;
 use windows::Win32::System::Threading::{OpenMutexW, SYNCHRONIZATION_SYNCHRONIZE};
 use windows_core::HSTRING;
 
+/// Release files of this repository only (not any github.com path).
+const RELEASE_DOWNLOAD_PATH: &str = "/TheToxicFactory/GrandHonor/releases/download/";
 const RELEASES_API: &str = "https://api.github.com/repos/TheToxicFactory/GrandHonor/releases/latest";
 const SETUP_ASSET: &str = "GrandHonor-Setup-x64.exe";
 const MAX_SETUP_SIZE: u64 = 64 * 1024 * 1024;
@@ -134,9 +136,34 @@ pub fn rollback_dir() -> PathBuf {
         .join("rollback")
 }
 
-/// Version kept for rollback, if a complete backup exists.
+/// `C:\ProgramData\GrandHonor` must be writable by administrators and SYSTEM only: under
+/// ProgramData a normal user may create folders, and a folder they own could hold a forged
+/// "previous version" that a rollback would copy into Program Files and start elevated.
+/// A folder that is not protected is removed and created again with a protected ACL.
+fn ensure_protected_root() -> Result<(), String> {
+    let root = rollback_dir().parent().map(Path::to_path_buf).ok_or("No ProgramData folder")?;
+    if root.exists() && !is_path_protected(&root) {
+        crate::log::error(&format!("{} was not protected; recreating it", root.display()));
+        std::fs::remove_dir_all(&root).map_err(|e| format!("Could not remove {}: {e}", root.display()))?;
+    }
+    if !root.exists() {
+        create_protected_directory(&root, true)?;
+    }
+    if is_path_protected(&root) { Ok(()) } else { Err(format!("{} is not protected", root.display())) }
+}
+
+/// The backup can be trusted: it and its parent are protected folders.
+fn backup_trusted() -> bool {
+    let dir = rollback_dir();
+    dir.parent().is_some_and(is_path_protected) && is_path_protected(&dir)
+}
+
+/// Version kept for rollback, if a complete and trusted backup exists.
 pub fn rollback_version() -> Option<String> {
     let dir = rollback_dir();
+    if !backup_trusted() {
+        return None;
+    }
     if !dir.join("GrandHonor.exe").is_file() || !dir.join("GrandHonor.Panel.exe").is_file() {
         return None;
     }
@@ -156,11 +183,9 @@ fn staging_dir(tag: &str) -> Result<PathBuf, String> {
 fn backup_current() -> Result<(), String> {
     let app = install_root();
     let dir = rollback_dir();
+    ensure_protected_root()?;
     if dir.exists() {
         std::fs::remove_dir_all(&dir).map_err(|e| format!("Could not clear the old backup: {e}"))?;
-    }
-    if let Some(parent) = dir.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     create_protected_directory(&dir, true)?;
     for file in ["GrandHonor.exe", "GrandHonor.Panel.exe"] {
@@ -183,7 +208,10 @@ pub fn start_update(release: &Release) -> Result<(), String> {
         return Err("Updates install only into the regular Program Files installation.".into());
     }
     let url = url::Url::parse(&release.url).map_err(|e| e.to_string())?;
-    if url.scheme() != "https" || !grandhonor_core::url_guard::is_trusted_update_host(url.host_str().unwrap_or("")) {
+    if url.scheme() != "https"
+        || !grandhonor_core::url_guard::is_trusted_update_host(url.host_str().unwrap_or(""))
+        || !(url.host_str() == Some("github.com") && url.path().starts_with(RELEASE_DOWNLOAD_PATH))
+    {
         return Err("The download address is not GrandHonor's GitHub release.".into());
     }
     let dir = staging_dir("update")?;
@@ -250,6 +278,9 @@ fn healthy(child: Option<std::process::Child>) -> bool {
 fn restore_backup() -> Result<(), String> {
     let app = install_root();
     let dir = rollback_dir();
+    if !backup_trusted() {
+        return Err("The stored previous version is not in a protected folder; not restoring it".into());
+    }
     for file in ["GrandHonor.exe", "GrandHonor.Panel.exe"] {
         let mut last = String::new();
         let ok = (0..20).any(|_| match std::fs::copy(dir.join(file), app.join(file)) {

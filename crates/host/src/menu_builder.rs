@@ -1120,15 +1120,7 @@ fn build_device_check(menu: &mut SubMenu<'_>) {
     );
     row.add_command_ex(
         t("Журнал событий", "Event log", "事件日志"),
-        Some(Box::new(|| {
-            let verb = HSTRING::from("open");
-            let file = HSTRING::from(crate::log::log_path().as_os_str());
-            unsafe {
-                let _ = windows::Win32::UI::Shell::ShellExecuteW(
-                    None, &verb, &file, None, None, windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL,
-                );
-            }
-        })),
+        Some(Box::new(|| crate::unelevated::open(&crate::log::log_path().display().to_string()))),
         Some(t("Что GrandHonor делал и какие были ошибки", "What GrandHonor did and any errors", "GrandHonor 的操作与错误")),
         None, Some("card"), true, false,
     );
@@ -1493,6 +1485,7 @@ fn build_keys_section(menu: &mut SubMenu<'_>) {
     ] {
         let current = hotkeys::action(key);
         let app = hotkeys::app_name(key);
+        let app_path = settings::key_app(key);
         let badge = match (current, &app) {
             (Action::App, Some(name)) => name.clone(),
             _ => current.label().to_string(),
@@ -1502,7 +1495,7 @@ fn build_keys_section(menu: &mut SubMenu<'_>) {
             let help = match choice {
                 Action::Default if key == hotkeys::COPILOT => Some(t("Открывает Copilot или то, что выбрано в Параметрах Windows", "Opens Copilot or what Windows Settings say", "打开 Copilot 或 Windows 设置中所选项")),
                 Action::Default => Some(t("Обычная клавиша F11 (полный экран в браузере)", "A normal F11 key (full screen in browsers)", "普通 F11 键（浏览器全屏）")),
-                Action::App => app.as_deref().or(Some(t("Выбрать программу…", "Choose a program…", "选择程序…"))),
+                Action::App => app_path.as_deref().or(Some(t("Выбрать программу…", "Choose a program…", "选择程序…"))),
                 _ => None,
             };
             page.add_command_ex(
@@ -1514,7 +1507,13 @@ fn build_keys_section(menu: &mut SubMenu<'_>) {
                             t("Программы", "Programs", "程序"),
                             "*.exe;*.lnk;*.bat;*.cmd",
                         ) {
-                            Ok(Some(path)) => settings::set_key_app(key, Some(&path.to_string_lossy())),
+                            Ok(Some(path)) if crate::unelevated::is_launchable_program(&path.to_string_lossy()) => {
+                                settings::set_key_app(key, Some(&path.to_string_lossy()))
+                            }
+                            Ok(Some(_)) => {
+                                show_error_box(t("Выберите программу: файл .exe, .lnk, .bat или .cmd.", "Choose a program: an .exe, .lnk, .bat or .cmd file.", "请选择程序：.exe、.lnk、.bat 或 .cmd 文件。"));
+                                return;
+                            }
                             Ok(None) => return,
                             Err(err) => {
                                 show_error_box(&err);

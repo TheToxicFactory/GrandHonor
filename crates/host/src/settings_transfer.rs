@@ -57,10 +57,7 @@ fn parse(text: &str) -> Result<Vec<(String, StoredValue)>, String> {
 
 pub fn write_file(path: &Path) -> Result<(), String> {
     let text = serde_json::to_string_pretty(&to_json()).map_err(|e| e.to_string())?;
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    std::fs::write(path, text).map_err(|e| e.to_string())
+    crate::safe_fs::write_atomic(path, text.as_bytes())
 }
 
 /// Refreshes the automatic backup (start-up, before updates). Errors are only logged.
