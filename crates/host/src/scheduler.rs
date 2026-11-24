@@ -367,11 +367,15 @@ fn remove_tasks(include_startup: bool) -> Result<(), String> {
     Ok(())
 }
 
+static STARTUP: crate::cache::Ttl<bool> = crate::cache::Ttl::new(std::time::Duration::from_secs(60));
+
+/// Cached for a minute (a Task Scheduler RPC per call); a change here clears it.
 pub fn is_startup_enabled() -> bool {
-    is_installation_path() && startup_task_enabled()
+    STARTUP.get(|| is_installation_path() && startup_task_enabled())
 }
 
 pub fn set_startup_enabled(enabled: bool) -> Result<(), String> {
+    STARTUP.clear();
     if enabled {
         ensure_registered()?;
     } else {

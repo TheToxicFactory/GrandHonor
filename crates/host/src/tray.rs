@@ -208,6 +208,7 @@ pub fn run_tray_loop(activation_event: HANDLE, open_panel_at_start: bool) -> i32
         on_quit,
         last_sensor_ms,
     };
+    crate::osd::set_fallback(on_notify.clone());
     let panel = PanelHost::new(ctx.clone());
 
     let runtime = Arc::new(AppRuntime {
@@ -221,7 +222,9 @@ pub fn run_tray_loop(activation_event: HANDLE, open_panel_at_start: bool) -> i32
         panel,
         ctx,
         activation_event_raw: activation_event.0 as usize,
-        last_resume_ms: AtomicU64::new(0),
+        // Start-up already restores everything: the display-on notice Windows sends right
+        // after registration falls inside the resume debounce instead of a second recovery.
+        last_resume_ms: AtomicU64::new(monotonic_ms().max(1)),
         suppress_backlight_until_ms: AtomicU64::new(0),
         wake_generation: AtomicU64::new(0),
         taskbar_created_msg: taskbar_created,
@@ -574,6 +577,8 @@ fn show_quick_menu(rt: &Arc<AppRuntime>, hwnd: HWND) {
         10 => {
             settings::set_display_filter(if eye { DisplayFilter::Off } else { DisplayFilter::EyeComfort });
             crate::hw::display_filter::apply_saved();
+            let text = if eye { t("Защита зрения выключена", "Eye comfort off", "护眼已关闭") } else { t("Защита зрения включена", "Eye comfort on", "护眼已开启") };
+            notice(rt, Icon::Display, text, None);
         }
         11 => handle_oem_event(rt, OemEvent::MicMutePressed),
         20 => rt.panel.toggle_or_open(true),
@@ -967,6 +972,7 @@ unsafe extern "system" fn wnd_proc(
                 PBT_APMPOWERSTATUSCHANGE => {
                     crate::presets::on_power_status_change();
                     thread::spawn(crate::hw::battery_alerts::on_power_status);
+                    crate::hw::night_mode::poke();
                     let rt_pw = rt_arc.clone();
                     if can_enable_performance_mode().is_err() {
                         thread::spawn(move || disable_performance_mode(&rt_pw));
@@ -1059,24 +1065,35 @@ unsafe extern "system" fn wnd_proc(
     }
 }
 
+/// Hovering the icon: refresh the tooltip off the UI thread (WMI and PDH reads can take tens of
+/// milliseconds and the mouse sends many moves a second). One refresh at a time; the shown
+/// text is updated when it is ready.
 fn update_tray_tooltip(rt: &AppRuntime) {
-    let (tip_text, _) = crate::hw::sensors::build_telemetry(true);
-    let mut nid = NOTIFYICONDATAW {
-        cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
-        hWnd: rt.hwnd,
-        uID: TRAY_ICON_ID,
-        uFlags: NIF_TIP,
-        ..Default::default()
-    };
-    write_wide(&mut nid.szTip, &tip_text);
-    unsafe {
-        let _ = Shell_NotifyIconW(NIM_MODIFY, &nid);
+    static BUSY: AtomicBool = AtomicBool::new(false);
+    if BUSY.swap(true, Ordering::AcqRel) {
+        return;
     }
-
     let ctx = rt.ctx.clone();
-    thread::spawn(move || {
+    let hwnd = rt.hwnd.0 as isize;
+    let spawned = thread::Builder::new().name("tray-tooltip".into()).stack_size(256 * 1024).spawn(move || {
         crate::menu_builder::refresh_sensors_throttled(&ctx, 5_000);
+        let (tip_text, _) = crate::hw::sensors::build_telemetry(false);
+        let mut nid = NOTIFYICONDATAW {
+            cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
+            hWnd: HWND(hwnd as *mut c_void),
+            uID: TRAY_ICON_ID,
+            uFlags: NIF_TIP,
+            ..Default::default()
+        };
+        write_wide(&mut nid.szTip, &tip_text);
+        unsafe {
+            let _ = Shell_NotifyIconW(NIM_MODIFY, &nid);
+        }
+        BUSY.store(false, Ordering::Release);
     });
+    if spawned.is_err() {
+        BUSY.store(false, Ordering::Release);
+    }
 }
 
 /// Adds (or, if Explorer still has it, refreshes) the tray icon. False when the taskbar is not

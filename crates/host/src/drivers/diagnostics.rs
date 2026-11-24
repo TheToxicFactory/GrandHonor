@@ -9,7 +9,8 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use windows::Win32::UI::WindowsAndMessaging::{
-    IDYES, MB_DEFBUTTON2, MB_ICONQUESTION, MB_YESNO, MessageBoxW,
+    IDYES, MB_DEFBUTTON2, MB_ICONINFORMATION, MB_ICONQUESTION, MB_OK, MB_SETFOREGROUND, MB_TOPMOST, MB_YESNO,
+    MessageBoxW,
 };
 use windows_core::HSTRING;
 
@@ -271,7 +272,7 @@ impl DriverPanel {
                 let this_inst = self.clone();
                 item.add_command_ex(
                     t("Установить обновление", "Install verified update", "安装已验证更新"),
-                    Some(Box::new(move || this_inst.install_direct(&u_inst))),
+                    Some(Box::new(move || this_inst.install_direct(&u_inst, false))),
                     Some(t(
                         "Скачивание в защищённую папку Windows Temp и проверка SHA-256 / подписи",
                         "Downloads into protected Windows Temp, verifies SHA-256 and Authenticode",
@@ -400,12 +401,7 @@ impl DriverPanel {
     /// BIOS flashing is refused unless the charger is connected and the battery has 30 %:
     /// a power loss during the flash can leave the laptop unable to start.
     fn install_bios(&self, update: &DriverUpdate) {
-        use windows::Win32::System::Power::{GetSystemPowerStatus, SYSTEM_POWER_STATUS};
-        let mut status = SYSTEM_POWER_STATUS::default();
-        let ok = unsafe { GetSystemPowerStatus(&mut status) }.is_ok()
-            && status.ACLineStatus == 1
-            && (status.BatteryLifePercent == 255 || status.BatteryLifePercent >= 30);
-        if !ok {
+        if !bios_power_ok() {
             self.set_message(
                 t(
                     "Для обновления BIOS подключите зарядку; заряд должен быть не ниже 30%.",
@@ -416,11 +412,16 @@ impl DriverPanel {
             );
             return;
         }
-        self.install_direct(update);
+        self.install_direct(update, true);
     }
 
-    fn install_direct(&self, update: &DriverUpdate) {
+    fn install_direct(&self, update: &DriverUpdate, bios: bool) {
         let confirm = |display_name: &str| -> bool {
+            // The download can take minutes: check the power again right before flashing.
+            if bios && !bios_power_ok() {
+                show_power_refusal();
+                return false;
+            }
             let prompt = match grandhonor_core::locale::language() {
                 grandhonor_core::locale::AppLanguage::Russian => {
                     format!("Пакет проверен (подпись HONOR/поставщика действительна).\n\nЗапустить установщик «{display_name}»?")
@@ -535,5 +536,27 @@ impl DriverPanel {
         } else if let Some(err) = res.error {
             self.set_message(err);
         }
+    }
+}
+
+/// BIOS flashing needs the charger and a known charge of at least 30 % (an unknown charge,
+/// 255, is refused): a power loss while flashing can leave the laptop unable to start.
+fn bios_power_ok() -> bool {
+    use windows::Win32::System::Power::{GetSystemPowerStatus, SYSTEM_POWER_STATUS};
+    let mut status = SYSTEM_POWER_STATUS::default();
+    unsafe { GetSystemPowerStatus(&mut status) }.is_ok()
+        && status.ACLineStatus == 1
+        && status.BatteryLifePercent != 255
+        && status.BatteryLifePercent >= 30
+}
+
+fn show_power_refusal() {
+    let text = HSTRING::from(t(
+        "Для обновления BIOS подключите зарядку; заряд должен быть не ниже 30%.",
+        "Connect the charger; the battery must be at least 30% to update the BIOS.",
+        "请接通电源，且电量需不低于 30% 才能更新 BIOS。",
+    ));
+    unsafe {
+        MessageBoxW(None, &text, &HSTRING::from("GrandHonor"), MB_OK | MB_ICONINFORMATION | MB_TOPMOST | MB_SETFOREGROUND);
     }
 }

@@ -119,7 +119,13 @@ pub fn parse_health_log(log: &[u8], model: String) -> Option<SsdHealth> {
 }
 
 /// Health of the first NVMe disk (normally the system SSD); None for SATA or when not readable.
+/// Cached for a minute (it opens the physical disks).
 pub fn read() -> Option<SsdHealth> {
+    static CACHE: crate::cache::Ttl<Option<SsdHealth>> = crate::cache::Ttl::new(std::time::Duration::from_secs(60));
+    CACHE.get(read_now)
+}
+
+fn read_now() -> Option<SsdHealth> {
     for index in 0..4 {
         let Some(handle) = open(index) else { continue };
         let mut input = vec![0u8; 8 + SPECIFIC_DATA_SIZE + LOG_SIZE];

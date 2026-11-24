@@ -208,7 +208,13 @@ fn run_schedule_loop(
 
         let Ok(guard) = state.0.lock() else { break };
         let initial_gen = guard.generation;
-        let (guard, timed_out) = state.1.wait_timeout(guard, wait_duration).unwrap();
+        if !settings::backlight_schedule_enabled() {
+            // Schedule off: sleep until a setting changes, no timer.
+            let guard = state.1.wait_while(guard, |g| g.generation == initial_gen).unwrap_or_else(|e| e.into_inner());
+            drop(guard);
+            continue;
+        }
+        let (guard, timed_out) = state.1.wait_timeout(guard, wait_duration).unwrap_or_else(|e| e.into_inner());
         let gen_changed = guard.generation != initial_gen;
         drop(guard);
 
@@ -285,11 +291,10 @@ fn should_be_on_now() -> bool {
     }
 }
 
+/// Seconds on a steady clock for override deadlines (UNIX time: monotonic across months and
+/// years, unlike a sum of year, month and day).
 fn local_now_secs() -> u64 {
-    let st = unsafe { GetLocalTime() };
-    let secs_in_day = (st.wHour as u64) * 3600 + (st.wMinute as u64) * 60 + (st.wSecond as u64);
-    let days = (st.wYear as u64) * 366 + (st.wMonth as u64) * 31 + (st.wDay as u64);
-    days * 86_400 + secs_in_day
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
 fn secs_until_next_boundary() -> u64 {

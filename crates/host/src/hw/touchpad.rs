@@ -554,7 +554,11 @@ fn read_device_loop(
             let wait = unsafe { WaitForMultipleObjects(&handles, false, INFINITE) };
             if wait != WAIT_OBJECT_0 {
                 unsafe {
-                    let _ = CancelIoEx(handle.0, Some(&overlapped));
+                    // The cancelled read still owns `overlapped` and `buffer` until it completes:
+                    // wait for that before they go out of scope (ERROR_OPERATION_ABORTED is fine).
+                    if CancelIoEx(handle.0, Some(&overlapped)).is_ok() {
+                        let _ = GetOverlappedResult(handle.0, &overlapped, &mut bytes_read, true);
+                    }
                 }
                 break;
             }

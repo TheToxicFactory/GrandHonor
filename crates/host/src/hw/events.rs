@@ -104,8 +104,13 @@ impl IWbemObjectSink_Impl for EventSink_Impl {
     }
 }
 
+/// Sent to the dispatcher on shutdown: WMI may keep a sink (and its sender) alive after the
+/// subscription is cancelled, so the channel alone would never close.
+const STOP_CODE: u32 = u32::MAX;
+
 pub struct OemEventWatcher {
     stop: Arc<AtomicBool>,
+    stop_tx: mpsc::Sender<u32>,
     wake_notify: Arc<(Mutex<u64>, Condvar)>,
     watcher_thread: Option<JoinHandle<()>>,
     dispatch_thread: Option<JoinHandle<()>>,
@@ -123,6 +128,7 @@ impl OemEventWatcher {
         let stop = Arc::new(AtomicBool::new(false));
         let wake_notify = Arc::new((Mutex::new(0u64), Condvar::new()));
         let (tx, rx) = mpsc::channel::<u32>();
+        let stop_tx = tx.clone();
 
         let dispatch_stop = stop.clone();
         let dispatch_thread = thread::Builder::new()
@@ -144,14 +150,9 @@ impl OemEventWatcher {
                 };
 
                 while !dispatch_stop.load(Ordering::Acquire) {
-                    // WMI may keep a sink (and its sender) alive after the subscription is
-                    // cancelled, so never wait without a timeout: that blocked quitting.
-                    let code = match rx.recv_timeout(Duration::from_millis(500)) {
-                        Ok(code) => code,
-                        Err(mpsc::RecvTimeoutError::Timeout) => continue,
-                        Err(mpsc::RecvTimeoutError::Disconnected) => break,
-                    };
-                    if dispatch_stop.load(Ordering::Acquire) {
+                    // Waits without a timer; `Drop` sends STOP_CODE so quitting never hangs.
+                    let Ok(code) = rx.recv() else { break };
+                    if code == STOP_CODE || dispatch_stop.load(Ordering::Acquire) {
                         break;
                     }
                     let now = now_ms();
@@ -242,6 +243,7 @@ impl OemEventWatcher {
 
         Self {
             stop,
+            stop_tx,
             wake_notify,
             watcher_thread,
             dispatch_thread,
@@ -260,6 +262,7 @@ impl OemEventWatcher {
 impl Drop for OemEventWatcher {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);
+        let _ = self.stop_tx.send(STOP_CODE);
         self.request_reconnect();
         if let Some(h) = self.watcher_thread.take() {
             let _ = h.join();
@@ -311,12 +314,12 @@ fn run_watcher_loop(
                 logged_once = false;
                 let (lock, cv) = &*wake_notify;
                 let Ok(mut guard) = lock.lock() else { break };
+                // No timer: a sink error, a reconnect request or shutdown wakes this.
                 while !stop.load(Ordering::Acquire)
                     && !error_flag.load(Ordering::Acquire)
                     && *guard == observed_gen
                 {
-                    let (g, _) = cv.wait_timeout(guard, Duration::from_secs(30)).unwrap();
-                    guard = g;
+                    guard = cv.wait(guard).unwrap_or_else(|e| e.into_inner());
                 }
                 let requested = *guard != observed_gen;
                 observed_gen = *guard;

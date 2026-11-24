@@ -61,31 +61,39 @@ pub fn poke() {
     cv.notify_all();
 }
 
+fn on_ac() -> bool {
+    crate::hw::battery_alerts::status().is_none_or(|(ac, _)| ac)
+}
+
+/// Brings the current power source in line: Efficiency inside the window (unless an app
+/// profile holds Performance), the saved mode back outside it. Windows keeps one mode per
+/// source, so each source has its own saved mode.
 fn apply() {
     let (from, to) = settings::night_mode_hours();
     let hour = u32::from(unsafe { GetLocalTime() }.wHour);
-    let want = settings::night_mode_enabled() && in_window(hour, from, to);
-    let saved = settings::night_mode_saved();
+    let source = crate::presets::source_key(on_ac());
+    let want = settings::night_mode_enabled() && in_window(hour, from, to) && !crate::hw::app_profiles::active();
+    let saved = settings::night_mode_saved(source);
     let Some(current) = windows_power_mode() else { return };
     if want && saved.is_none() {
-        settings::set_night_mode_saved(Some(code(current)));
+        settings::set_night_mode_saved(source, Some(code(current)));
         if current != WINDOWS_EFFICIENCY {
             match set_windows_power_mode(WINDOWS_EFFICIENCY) {
                 Ok(()) => {
-                    let text = format!("{} {to}:00", t("Тихий режим до", "Quiet until", "安静模式至"));
-                    crate::osd::show(crate::osd::Icon::Normal, &text, None);
+                    let text = format!("{} {to:02}:00", t("Тихий режим до", "Quiet until", "安静模式至"));
+                    crate::osd::notify(crate::osd::Icon::Normal, &text);
                 }
                 Err(err) => crate::log::error(&format!("Quiet nights: {err}")),
             }
         }
     } else if !want && let Some(before) = saved {
-        settings::set_night_mode_saved(None);
+        settings::set_night_mode_saved(source, None);
         // Changed by hand during the night: leave the person's choice alone.
-        if current == WINDOWS_EFFICIENCY && before != 1 {
-            match set_windows_power_mode(mode(before)) {
-                Ok(()) => {}
-                Err(err) => crate::log::error(&format!("Quiet nights restore: {err}")),
-            }
+        if current == WINDOWS_EFFICIENCY
+            && before != 1
+            && let Err(err) = set_windows_power_mode(mode(before))
+        {
+            crate::log::error(&format!("Quiet nights restore: {err}"));
         }
     }
 }
@@ -95,14 +103,19 @@ fn run() {
     let mut seen = 0;
     loop {
         apply();
-        let wait = if settings::night_mode_enabled() || settings::night_mode_saved().is_some() {
-            let (from, to) = settings::night_mode_hours();
-            Duration::from_secs(secs_until_boundary(from, to).clamp(1, 3600))
-        } else {
-            Duration::from_secs(3600)
-        };
+        let busy = settings::night_mode_enabled()
+            || settings::night_mode_saved("Ac").is_some()
+            || settings::night_mode_saved("Dc").is_some();
         let Ok(guard) = lock.lock() else { return };
-        let (guard, _) = cv.wait_timeout_while(guard, wait, |g| *g == seen).unwrap_or_else(|e| e.into_inner());
+        let guard = if busy {
+            // Until the next boundary (at most an hour, so a changed clock is caught too).
+            let (from, to) = settings::night_mode_hours();
+            let wait = Duration::from_secs(secs_until_boundary(from, to).clamp(1, 3600));
+            cv.wait_timeout_while(guard, wait, |g| *g == seen).unwrap_or_else(|e| e.into_inner()).0
+        } else {
+            // Off and nothing to restore: sleep until the setting changes.
+            cv.wait_while(guard, |g| *g == seen).unwrap_or_else(|e| e.into_inner())
+        };
         seen = *guard;
     }
 }

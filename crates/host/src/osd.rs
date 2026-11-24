@@ -103,7 +103,26 @@ struct Notice {
     level: Option<(u8, u8)>,
 }
 
-/// Shows a notice for about 1.5 s. Non-blocking; does nothing when on-screen notices are off.
+type Fallback = std::sync::Arc<dyn Fn(&str, &str) + Send + Sync>;
+static FALLBACK: std::sync::OnceLock<Fallback> = std::sync::OnceLock::new();
+
+/// The tray notification used by `notify` when on-screen notices are off (set by tray.rs).
+pub fn set_fallback(f: Fallback) {
+    let _ = FALLBACK.set(f);
+}
+
+/// A notice about something the user did not just do (a reminder, a battery event): on screen,
+/// or as a Windows notification when on-screen notices are off, so it is never lost.
+pub fn notify(icon: Icon, text: &str) {
+    if settings::osd_enabled() {
+        show(icon, text, None);
+    } else if let Some(f) = FALLBACK.get() {
+        f("GrandHonor", text);
+    }
+}
+
+/// Shows a notice for about 1.5 s. Non-blocking; does nothing when on-screen notices are off
+/// (used to confirm the user's own actions; background events use `notify`).
 pub fn show(icon: Icon, text: &str, level: Option<(u8, u8)>) {
     if !settings::osd_enabled() {
         return;

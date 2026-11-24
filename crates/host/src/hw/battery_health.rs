@@ -64,7 +64,13 @@ impl BatteryHealth {
 }
 
 /// Reads the first system battery. None when there is none or the driver does not answer.
+/// Cached for a minute: capacity changes slowly and the panel rebuilds often.
 pub fn read() -> Option<BatteryHealth> {
+    static CACHE: crate::cache::Ttl<Option<BatteryHealth>> = crate::cache::Ttl::new(std::time::Duration::from_secs(60));
+    CACHE.get(read_now)
+}
+
+fn read_now() -> Option<BatteryHealth> {
     unsafe {
         let set = SetupDiGetClassDevsW(Some(&GUID_DEVICE_BATTERY), PCWSTR::null(), None, DIGCF_PRESENT | DIGCF_DEVICEINTERFACE).ok()?;
         let mut result = None;

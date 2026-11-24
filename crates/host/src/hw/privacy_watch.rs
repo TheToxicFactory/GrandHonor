@@ -15,7 +15,7 @@ use super::com::ComGuard;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use windows::Win32::Media::Audio::{
-    AudioSessionDisconnectReason, AudioSessionState, AudioSessionStateActive, DEVICE_STATE_ACTIVE,
+    AudioSessionDisconnectReason, AudioSessionState, AudioSessionStateActive, AudioSessionStateExpired, DEVICE_STATE_ACTIVE,
     IAudioSessionControl, IAudioSessionEvents, IAudioSessionEvents_Impl, IAudioSessionManager2,
     IAudioSessionNotification, IAudioSessionNotification_Impl, IMMDeviceEnumerator, MMDeviceEnumerator,
     eCapture,
@@ -108,6 +108,9 @@ impl IAudioSessionEvents_Impl for SessionEvents_Impl {
     }
 }
 
+/// Sessions followed at most (the newest are kept).
+const MAX_SESSIONS: usize = 64;
+
 #[implement(IAudioSessionNotification)]
 struct NewSessions {
     handler: Handler,
@@ -132,6 +135,19 @@ fn follow(session: &IAudioSessionControl, handler: &Handler, sessions: &Mutex<Ve
     if unsafe { session.RegisterAudioSessionNotification(&events) }.is_ok()
         && let Ok(mut list) = sessions.lock()
     {
+        // Every call or recording adds a session: drop the ones Windows has expired, and keep
+        // at most MAX_SESSIONS so the list cannot grow for the whole uptime.
+        list.retain(|(s, e)| {
+            let alive = unsafe { s.GetState() }.is_ok_and(|st| st != AudioSessionStateExpired);
+            if !alive {
+                let _ = unsafe { s.UnregisterAudioSessionNotification(e) };
+            }
+            alive
+        });
+        while list.len() >= MAX_SESSIONS {
+            let (s, e) = list.remove(0);
+            let _ = unsafe { s.UnregisterAudioSessionNotification(&e) };
+        }
         list.push((session.clone(), events));
     }
 }

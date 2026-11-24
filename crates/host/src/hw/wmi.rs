@@ -287,7 +287,11 @@ pub fn honor_wmi_call(command: u64) -> Result<Vec<u8>, WmiError> {
 
 struct AcpiDirectState {
     session: Option<HonorWmiSession>,
+    /// The WMI interface itself is unreachable: every direct command waits for a reconnect.
     access_denied: bool,
+    /// Commands this firmware refused: only these are skipped (one unknown command, such as a
+    /// brightness step, must not switch off the others, such as the microphone LED).
+    unsupported: Vec<(u8, u8)>,
 }
 
 static ACPI_DIRECT_GATE: OnceLock<Mutex<AcpiDirectState>> = OnceLock::new();
@@ -297,6 +301,7 @@ fn acpi_gate() -> &'static Mutex<AcpiDirectState> {
         Mutex::new(AcpiDirectState {
             session: None,
             access_denied: false,
+            unsupported: Vec::new(),
         })
     })
 }
@@ -306,7 +311,7 @@ pub fn acpi_try_call(group: u8, command: u8, value: u8) -> bool {
     let Ok(mut state) = acpi_gate().lock() else {
         return false;
     };
-    if state.access_denied {
+    if state.access_denied || state.unsupported.contains(&(group, command)) {
         return false;
     }
     let session = state.session.get_or_insert_with(HonorWmiSession::new);
@@ -318,8 +323,12 @@ pub fn acpi_try_call(group: u8, command: u8, value: u8) -> bool {
     match session.call_bytes(&input) {
         Ok(_) => true,
         Err(err) => {
-            state.access_denied = true;
-            state.session = None;
+            if err.is_rejected().is_some() {
+                state.unsupported.push((group, command));
+            } else {
+                state.access_denied = true;
+                state.session = None;
+            }
             crate::log::error_with(
                 &format!("Honor ACPI direct command {group:02X} {command:02X} unavailable"),
                 &err,
@@ -333,6 +342,7 @@ pub fn acpi_reconnect() {
     let _com = ComGuard::mta();
     if let Ok(mut state) = acpi_gate().lock() {
         state.access_denied = false;
+        state.unsupported.clear();
         state.session = None;
     }
 }

@@ -75,7 +75,7 @@ pub fn on_power_status() {
         HOT_SHOWN_AT.store(now_secs(), Ordering::Release);
         crate::log::info(&format!("Battery is hot: {temp} C"));
         let text = format!("{} {temp} °C", t("Батарея нагрелась:", "Battery is hot:", "电池温度过高："));
-        crate::osd::show(Icon::Warning, &text, None);
+        crate::osd::notify(Icon::Warning, &text);
     }
     if on_ac {
         let mode = settings::battery_protection().unwrap_or(BatteryMode::Disabled);
@@ -83,11 +83,11 @@ pub fn on_power_status() {
         let end = mode.thresholds().1.saturating_sub(1);
         if mode != BatteryMode::Disabled && crossed_up(before, percent, end) && !LIMIT_SHOWN.swap(true, Ordering::AcqRel) {
             let text = format!("{} {}%", t("Заряд остановлен на", "Charging stopped at", "充电已停止于"), mode.thresholds().1);
-            crate::osd::show(Icon::Battery, &text, None);
+            crate::osd::notify(Icon::Battery, &text);
         }
     } else if crossed_down(before, percent, LOW_PERCENT) && !LOW_SHOWN.swap(true, Ordering::AcqRel) {
         let text = format!("{percent}% · {}", t("подключите зарядку", "plug in the charger", "请连接充电器"));
-        crate::osd::show(Icon::Warning, &text, None);
+        crate::osd::notify(Icon::Warning, &text);
     }
 }
 
@@ -117,7 +117,7 @@ pub fn end_full_charge(full: bool) {
         Err(err) => crate::log::error_with("Full charge once: could not restore the limit", &err),
     }
     if full {
-        crate::osd::show(Icon::Battery, t("Батарея заряжена до 100%", "Battery charged to 100%", "电池已充至 100%"), None);
+        crate::osd::notify(Icon::Battery, t("Батарея заряжена до 100%", "Battery charged to 100%", "电池已充至 100%"));
     }
 }
 
@@ -144,7 +144,7 @@ pub fn on_resume() {
     crate::log::info(&format!("Sleep on battery: {slept} s, {before}% -> {percent}%"));
     if settings::charge_notices_enabled() {
         let text = format!("{} {span}: −{lost}%", t("Сон", "Sleep", "睡眠"));
-        crate::osd::show(Icon::Battery, &text, None);
+        crate::osd::notify(Icon::Battery, &text);
     }
 }
 

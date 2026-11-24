@@ -321,6 +321,22 @@ begin
   Result := (VersionOrder = 0) and (OperationPage.SelectedValueIndex = 0);
 end;
 
+{ After "Roll back", Program Files holds the version kept in the protected rollback folder,
+  not this setup's build: that copy is trusted for the privileged clean-up too. }
+function MatchesRollbackCopy: Boolean;
+var
+  Kept: String;
+begin
+  Result := False;
+  Kept := ExpandConstant('{commonappdata}\GrandHonor\rollback\GrandHonor.exe');
+  if not FileExists(Kept) or not FileExists(FixedRoot + '\GrandHonor.exe') then Exit;
+  try
+    Result := CompareText(GetSHA256OfFile(Kept), GetSHA256OfFile(FixedRoot + '\GrandHonor.exe')) = 0;
+  except
+    Log(GetExceptionMessage);
+  end;
+end;
+
 function Matches(const Name, Expected: String): Boolean;
 var
   Path: String;
@@ -548,7 +564,7 @@ var
 begin
   if Step = usUninstall then begin
     CloseRunningHost;
-    if Matches('GrandHonor.exe', '{#HostHash}') then begin
+    if Matches('GrandHonor.exe', '{#HostHash}') or MatchesRollbackCopy then begin
       if not Exec(FixedRoot + '\GrandHonor.exe', '--uninstall-privileged-tasks', FixedRoot,
         SW_HIDE, ewWaitUntilTerminated, Code) or (Code <> 0) then
         Log('Could not remove the GrandHonor startup task.');

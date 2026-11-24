@@ -5,7 +5,7 @@ use std::path::Path;
 use windows::Win32::Foundation::HWND;
 use windows::Win32::Security::WinTrust::{
     WINTRUST_ACTION_GENERIC_VERIFY_V2, WINTRUST_DATA, WINTRUST_DATA_0, WINTRUST_DATA_PROVIDER_FLAGS,
-    WINTRUST_FILE_INFO, WTD_CHOICE_FILE, WTD_REVOKE_NONE, WTD_UI_NONE,
+    WINTRUST_FILE_INFO, WTD_CHOICE_FILE, WTD_REVOKE_WHOLECHAIN, WTD_UI_NONE,
     WinVerifyTrust,
 };
 use windows_core::{HSTRING, PCWSTR};
@@ -62,13 +62,14 @@ pub fn authenticode_signer(path: &Path) -> Option<String> {
     let mut data = WINTRUST_DATA {
         cbStruct: std::mem::size_of::<WINTRUST_DATA>() as u32,
         dwUIChoice: WTD_UI_NONE,
-        fdwRevocationChecks: WTD_REVOKE_NONE,
+        fdwRevocationChecks: WTD_REVOKE_WHOLECHAIN,
         dwUnionChoice: WTD_CHOICE_FILE,
         Anonymous: WINTRUST_DATA_0 {
             pFile: &mut file_info,
         },
         dwStateAction: WTD_STATEACTION_VERIFY,
-        dwProvFlags: WINTRUST_DATA_PROVIDER_FLAGS(0x0000_0040),
+        // Revocation is checked (a stolen, revoked certificate must fail); the root is exempt.
+        dwProvFlags: WINTRUST_DATA_PROVIDER_FLAGS(0x0000_0080),
         ..Default::default()
     };
     let mut action = WINTRUST_ACTION_GENERIC_VERIFY_V2;

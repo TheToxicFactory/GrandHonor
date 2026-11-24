@@ -98,4 +98,6 @@ pub fn apply(key: &'static str) {
     if let Some(value) = settings::preset_value(key, BRIGHTNESS).filter(|&v| v >= 1) {
         let _ = crate::hw::wmi::set_wmi_brightness(value - 1);
     }
+    // Quiet nights outrank a preset's power mode: let them re-check after it.
+    crate::hw::night_mode::poke();
 }

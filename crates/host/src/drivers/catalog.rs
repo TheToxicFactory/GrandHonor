@@ -1007,6 +1007,15 @@ fn prepare_package(
     }
     if ext.eq_ignore_ascii_case(".exe") {
         check_installer_signature(&pkg_path)?;
+        // Without a HONOR checksum only HONOR's own signature is trusted, not any signer.
+        if expected_hash.is_none() && !crate::drivers::trust::is_honor_signed(&pkg_path) {
+            return Err(t(
+                "Пакет без контрольной суммы HONOR подписан не HONOR.",
+                "The package has no HONOR checksum and is not signed by HONOR.",
+                "该软件包没有 HONOR 校验和，且不是 HONOR 签名。",
+            )
+            .to_string());
+        }
     }
     Ok(pkg_path)
 }

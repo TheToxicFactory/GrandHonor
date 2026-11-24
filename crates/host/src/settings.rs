@@ -98,11 +98,13 @@ pub enum StoredValue {
 }
 
 /// Runtime state, not user choices: never exported or imported.
-const RUNTIME_VALUES: [&str; 9] = [
+const RUNTIME_VALUES: [&str; 11] = [
     "ProfileWriteTick",
+    "AppProfileSaved",
+    "NightModeSavedAc",
     "FullChargeOnce",
     "BatteryWear",
-    "NightModeSaved",
+    "NightModeSavedDc",
     "PerformanceModeActive",
     "HunterModeActive",
     "CpuCapOriginalAc",
@@ -363,13 +365,14 @@ pub fn set_night_mode_hours(from: u32, to: u32) {
     write_u32("NightModeTo", Some(to.min(23)));
 }
 
-/// The Windows power mode to put back when a quiet night ends (runtime state).
-pub fn night_mode_saved() -> Option<u32> {
-    read_u32("NightModeSaved")
+/// The Windows power mode to put back when a quiet night ends, per power source ("Ac"/"Dc"):
+/// Windows keeps one mode for each (runtime state).
+pub fn night_mode_saved(source: &str) -> Option<u32> {
+    read_u32(&format!("NightModeSaved{source}"))
 }
 
-pub fn set_night_mode_saved(mode: Option<u32>) {
-    write_u32("NightModeSaved", mode);
+pub fn set_night_mode_saved(source: &str, mode: Option<u32>) {
+    write_u32(&format!("NightModeSaved{source}"), mode);
 }
 
 /// What a remappable key does (`hotkeys.rs`): "Copilot" or "Yoyo" → action code.
@@ -388,6 +391,15 @@ pub fn key_app(key: &str) -> Option<String> {
 
 pub fn set_key_app(key: &str, path: Option<&str>) {
     write_str(&format!("KeyApp{key}"), path);
+}
+
+/// What an app profile will restore ("mode,rate"); runtime state, survives a crash.
+pub fn app_profile_saved() -> Option<String> {
+    read_str("AppProfileSaved")
+}
+
+pub fn set_app_profile_saved(value: Option<&str>) {
+    write_str("AppProfileSaved", value);
 }
 
 /// Per-app profiles: program file names, "game.exe|other.exe" (`hw/app_profiles.rs`).

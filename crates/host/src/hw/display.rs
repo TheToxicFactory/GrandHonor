@@ -31,8 +31,15 @@ fn supported_rates(current: &DEVMODEW) -> Vec<u32> {
     rates
 }
 
-/// Supported refresh rates and the current one, for the Power tab.
+static RATES: crate::cache::Ttl<Option<(Vec<u32>, u32)>> = crate::cache::Ttl::new(std::time::Duration::from_secs(30));
+
+/// Supported refresh rates and the current one, cached for 30 s (up to a thousand mode
+/// queries); every rate change made here clears it.
 pub fn rates() -> Option<(Vec<u32>, u32)> {
+    RATES.get(rates_now)
+}
+
+fn rates_now() -> Option<(Vec<u32>, u32)> {
     let current = mode(ENUM_CURRENT_SETTINGS)?;
     let rates = supported_rates(&current);
     (rates.len() >= 2).then_some((rates, current.dmDisplayFrequency))
@@ -40,6 +47,7 @@ pub fn rates() -> Option<(Vec<u32>, u32)> {
 
 /// Sets an exact refresh rate if the display supports it at the current resolution.
 pub fn set_refresh_rate(hz: u32) -> bool {
+    RATES.clear();
     let Some(mut current) = mode(ENUM_CURRENT_SETTINGS) else { return false };
     if current.dmDisplayFrequency == hz {
         return true;
@@ -55,6 +63,7 @@ pub fn set_refresh_rate(hz: u32) -> bool {
 
 /// Switches to the other rate and returns it, or `None` if there is nothing to switch.
 pub fn toggle_refresh_rate() -> Option<u32> {
+    RATES.clear();
     let mut current = mode(ENUM_CURRENT_SETTINGS)?;
     let rates = supported_rates(&current);
     let max = *rates.last()?;

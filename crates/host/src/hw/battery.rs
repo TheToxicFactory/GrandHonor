@@ -63,9 +63,13 @@ impl BatteryProtectionService {
         if self.disposed.load(Ordering::Acquire) {
             return;
         }
-        let Ok(_lock) = self.restore_busy.try_lock() else {
+        // Wait for an earlier restore instead of skipping this one; it re-checks the generation.
+        let Ok(_lock) = self.restore_busy.lock() else {
             return;
         };
+        if self.generation.load(Ordering::Acquire) != wake_gen_id {
+            return;
+        }
 
         let expected = preferred.thresholds();
         for _ in 0..CHECK_COUNT {
@@ -82,7 +86,10 @@ impl BatteryProtectionService {
             {
                 return;
             }
-            if settings::preferred_battery_protection() != Some(preferred) {
+            // Compare like with like: `preferred` is already the effective mode (a smart-charge
+            // hold or "charge to 100 % once" replaces the stored choice).
+            let still = settings::preferred_battery_protection().map(super::smart_charge::effective);
+            if still != Some(preferred) {
                 return;
             }
             if let Ok(snap) = sensors::read_and_store("resume-battery")

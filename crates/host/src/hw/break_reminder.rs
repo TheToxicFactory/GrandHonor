@@ -1,7 +1,7 @@
 //! Display → Eye breaks: every N minutes of work, an on-screen reminder to look into the
 //! distance for 20 seconds (the 20-20-20 rule). Five idle minutes count as a break and restart
 //! the count; a full-screen game, video or presentation postpones the reminder. One thread
-//! that wakes once a minute only while the reminder is on (an hour at a time otherwise).
+//! that wakes once a minute only while the reminder is on and sleeps without a timer when it is off.
 
 use crate::settings;
 use std::sync::{Condvar, Mutex, OnceLock};
@@ -68,11 +68,14 @@ fn run() {
     loop {
         let minutes = settings::break_reminder_minutes();
         let interval = Duration::from_secs(u64::from(minutes) * 60);
-        let wait = if minutes == 0 { Duration::from_secs(3600) } else { interval.saturating_sub(since.elapsed()).min(STEP) };
         let Ok(guard) = lock.lock() else { return };
-        let (guard, _) = cv
-            .wait_timeout_while(guard, wait.max(Duration::from_secs(1)), |s| s.generation == seen)
-            .unwrap_or_else(|e| e.into_inner());
+        let guard = if minutes == 0 {
+            // Off: sleep until the setting changes.
+            cv.wait_while(guard, |s| s.generation == seen).unwrap_or_else(|e| e.into_inner())
+        } else {
+            let wait = interval.saturating_sub(since.elapsed()).min(STEP).max(Duration::from_secs(1));
+            cv.wait_timeout_while(guard, wait, |s| s.generation == seen).unwrap_or_else(|e| e.into_inner()).0
+        };
         if guard.generation != seen {
             seen = guard.generation;
             since = Instant::now();
@@ -90,15 +93,13 @@ fn run() {
             if full_screen_busy() {
                 continue;
             }
-            crate::osd::show(
+            crate::osd::notify(
                 crate::osd::Icon::Display,
                 grandhonor_core::locale::t(
                     "Отдых для глаз: посмотрите вдаль 20 секунд",
                     "Eye break: look into the distance for 20 seconds",
                     "护眼休息：请远眺 20 秒",
-                ),
-                None,
-            );
+                ));
             since = Instant::now();
         }
     }

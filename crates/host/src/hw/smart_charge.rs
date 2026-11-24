@@ -2,18 +2,29 @@
 //! protection": a laptop that stays on the charger for hours wears its battery at 100 %. With the
 //! switch on, after `HOLD_AFTER` on the charger GrandHonor holds the battery at 70–90 % (Office)
 //! while the chosen mode is Unrestricted or Travel, and restores that mode when the charger is
-//! removed. One sleeping thread waits for the hold time; nothing runs while on battery.
+//! removed. One thread waits once for the hold time (no timer ticks); nothing runs on battery.
 
 use crate::hw::battery::set_battery_mode;
 use crate::settings;
 use grandhonor_core::protocol::BatteryMode;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::sync::{Condvar, Mutex};
+use std::time::Duration;
 
 pub const HOLD_AFTER: Duration = Duration::from_secs(3 * 60 * 60);
 const HOLD_MODE: BatteryMode = BatteryMode::Office;
 
-static GENERATION: AtomicU64 = AtomicU64::new(0);
+/// Bumped by every charger change or switch change; a waiting hold ends when it moves.
+static GENERATION: (Mutex<u64>, Condvar) = (Mutex::new(0), Condvar::new());
+
+fn bump() -> u64 {
+    let (lock, cv) = &GENERATION;
+    let generation = lock.lock().map(|mut g| {
+        *g += 1;
+        *g
+    });
+    cv.notify_all();
+    generation.unwrap_or(0)
+}
 
 /// The thresholds the firmware should have now: the hold while it is active, else the choice.
 pub fn effective(preferred: BatteryMode) -> BatteryMode {
@@ -32,7 +43,7 @@ fn wants_hold(preferred: Option<BatteryMode>) -> bool {
 
 /// Called when the charger is connected or removed (and once at start).
 pub fn on_source(on_ac: bool) {
-    let generation = GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
+    let generation = bump();
     if !on_ac {
         release();
         return;
@@ -44,14 +55,14 @@ pub fn on_source(on_ac: bool) {
         .name("smart-charge".into())
         .stack_size(128 * 1024)
         .spawn(move || {
-            let start = Instant::now();
-            // Sleep in long steps so a charger change or the switch going off ends the wait.
-            while start.elapsed() < HOLD_AFTER {
-                std::thread::sleep(Duration::from_secs(60));
-                if GENERATION.load(Ordering::Acquire) != generation {
-                    return;
-                }
+            // One wait for the whole hold time; a charger change or the switch ends it early.
+            let (lock, cv) = &GENERATION;
+            let Ok(guard) = lock.lock() else { return };
+            let (guard, _) = cv.wait_timeout_while(guard, HOLD_AFTER, |g| *g == generation).unwrap_or_else(|e| e.into_inner());
+            if *guard != generation {
+                return;
             }
+            drop(guard);
             if !settings::smart_charge_enabled()
                 || settings::full_charge_once()
                 || !wants_hold(settings::preferred_battery_protection())
@@ -62,15 +73,13 @@ pub fn on_source(on_ac: bool) {
                 Ok(()) => {
                     settings::set_smart_charge_holding(true);
                     crate::log::info("Smart charging: holding the battery at 70-90% after 3 h on the charger");
-                    crate::osd::show(
+                    crate::osd::notify(
                         crate::osd::Icon::Battery,
                         grandhonor_core::locale::t(
                             "Умная зарядка: держим 70–90%",
                             "Smart charging: holding 70–90%",
                             "智能充电：保持 70–90%",
-                        ),
-                        None,
-                    );
+                        ));
                 }
                 Err(err) => crate::log::error_with("Smart charging could not set the hold", &err),
             }
@@ -79,7 +88,7 @@ pub fn on_source(on_ac: bool) {
 
 /// Ends a hold and puts the chosen mode back (charger removed, switch turned off).
 pub fn release() {
-    GENERATION.fetch_add(1, Ordering::AcqRel);
+    bump();
     if !settings::smart_charge_holding() {
         return;
     }
