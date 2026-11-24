@@ -164,8 +164,10 @@ struct Panel {
     glass: Option<Arc<RenderImage>>,
     glass_tried: bool,
     stable: Stabilizer,
-    /// The look whose window frame colour is applied.
-    framed_look: Option<Look>,
+    /// The look (and Glass edge colour) whose window frame colour is applied.
+    framed_look: Option<(Look, Option<u32>)>,
+    /// Average colour (0xRRGGBB) along the edge of the frosted backdrop.
+    glass_edge: Option<u32>,
     /// Position (0–1) of the slider knob while it is dragged, and the stop last sent.
     slider_drag: Option<f32>,
     slider_sent: Option<u32>,
@@ -926,20 +928,27 @@ struct Ctx<'a> {
 impl Render for Panel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let look = Look::from_code(self.snapshot.as_ref().and_then(|s| s.appearance.as_deref()));
-        if self.framed_look != Some(look) {
-            set_window_frame(window, look);
-            self.framed_look = Some(look);
-        }
         if look == Look::Glass && !self.glass_tried {
             // Taken once, the first time Glass is shown (at open, or right after choosing it).
             self.glass_tried = true;
             self.glass = window_hwnd(window).and_then(glass::capture).map(|b| {
+                self.glass_edge = Some(edge_colour(&b.bgra, b.width as usize, b.height as usize));
                 let buffer = image::RgbaImage::from_raw(b.width, b.height, b.bgra);
                 Arc::new(RenderImage::new(smallvec::SmallVec::from_elem(
                     image::Frame::new(buffer.unwrap_or_default()),
                     1,
                 )))
             });
+        }
+        // Windows keeps a 1 px frame (2 px at 150 %) around the window. With no colour it is
+        // black, so in Glass it takes the colour of the glass at the edge and disappears.
+        let palette_now = Palette::for_window(window, look);
+        let edge = (look == Look::Glass)
+            .then(|| self.glass_edge.map(|c| blend_over(c, palette_now.backdrop)))
+            .flatten();
+        if self.framed_look != Some((look, edge)) {
+            set_window_frame(window, look, edge);
+            self.framed_look = Some((look, edge));
         }
         if self.refocus_after_busy && !self.busy {
             self.refocus_after_busy = false;
@@ -990,11 +999,17 @@ impl Render for Panel {
             .bg(rgba(if palette.glass { palette.glass_base } else { palette.backdrop }))
             .overflow_hidden()
             .when_some(self.glass.clone().filter(|_| palette.glass), |el, frost| {
+                // The image is 1/8 of the window; stretched, its outermost texel fades into the
+                // dark base. Drawing it one texel (8 px) larger on each side keeps that fade
+                // outside the window.
                 el.child(
-                    img(ImageSource::Render(frost))
+                    div()
                         .absolute()
-                        .size_full()
-                        .object_fit(ObjectFit::Fill),
+                        .top(px(-8.))
+                        .left(px(-8.))
+                        .right(px(-8.))
+                        .bottom(px(-8.))
+                        .child(img(ImageSource::Render(frost)).size_full().object_fit(ObjectFit::Fill)),
                 )
             })
             .when(palette.glass, |el| {
@@ -2409,14 +2424,46 @@ unsafe extern "system" {
 /// DWM draws a 1 px frame around the window. Glass has none (`DWMWA_COLOR_NONE`): the frosted
 /// desktop copy meets the desktop directly. Graphite keeps a faint hairline so black on black
 /// still has an edge.
-fn set_window_frame(window: &Window, look: Look) {
+/// Average 0xRRGGBB of the outermost pixels of a top-down BGRA image.
+fn edge_colour(bgra: &[u8], w: usize, h: usize) -> u32 {
+    let (mut sum, mut n) = ([0u64; 3], 0u64);
+    for y in 0..h {
+        for x in 0..w {
+            if x == 0 || y == 0 || x + 1 == w || y + 1 == h {
+                let p = (y * w + x) * 4;
+                if let Some(px) = bgra.get(p..p + 3) {
+                    sum[0] += u64::from(px[2]);
+                    sum[1] += u64::from(px[1]);
+                    sum[2] += u64::from(px[0]);
+                    n += 1;
+                }
+            }
+        }
+    }
+    let n = n.max(1);
+    ((sum[0] / n) as u32) << 16 | ((sum[1] / n) as u32) << 8 | (sum[2] / n) as u32
+}
+
+/// `rgb` (0xRRGGBB) under the tint `rgba` (0xRRGGBBAA), as the panel draws them.
+fn blend_over(rgb: u32, rgba: u32) -> u32 {
+    let a = (rgba & 0xff) as f32 / 255.0;
+    let mix = |shift: u32| {
+        let under = ((rgb >> shift) & 0xff) as f32;
+        let over = ((rgba >> (shift + 8)) & 0xff) as f32;
+        (over * a + under * (1.0 - a)).round() as u32
+    };
+    mix(16) << 16 | mix(8) << 8 | mix(0)
+}
+
+fn set_window_frame(window: &Window, look: Look, glass_edge: Option<u32>) {
     const DWMWA_BORDER_COLOR: u32 = 34;
     const DWMWA_COLOR_NONE: u32 = 0xFFFF_FFFE;
     let Some(hwnd) = window_hwnd(window) else { return };
     let dark = matches!(window.appearance(), WindowAppearance::Dark | WindowAppearance::VibrantDark);
     // COLORREF 0x00BBGGRR.
     let color = match look {
-        Look::Glass => DWMWA_COLOR_NONE,
+        // COLORREF is 0x00BBGGRR.
+        Look::Glass => glass_edge.map_or(DWMWA_COLOR_NONE, |c| (c & 0xff) << 16 | (c & 0xff00) | (c >> 16) & 0xff),
         Look::Graphite if dark => 0x0026_2626,
         Look::Graphite => 0x00d8_d6d4,
     };
@@ -2429,7 +2476,6 @@ fn setup_frosted_backdrop(window: &Window) {
     const DWMWA_USE_IMMERSIVE_DARK_MODE: u32 = 20;
     const DWMWA_WINDOW_CORNER_PREFERENCE: u32 = 33;
     const DWMWA_SYSTEMBACKDROP_TYPE: u32 = 38;
-    const DWMWA_BORDER_COLOR: u32 = 34;
     const DWMWCP_ROUND: u32 = 2;
     const DWMSBT_TRANSIENTWINDOW: u32 = 3;
 
@@ -2465,14 +2511,8 @@ fn setup_frosted_backdrop(window: &Window) {
             &DWMSBT_TRANSIENTWINDOW,
             size_of::<u32>() as u32,
         );
-        // COLORREF 0x00BBGGRR: a quiet frame like Windows 11 flyouts.
-        let border: u32 = if dark == 1 { 0x0040_3a38 } else { 0x00d8_d6d4 };
-        let _ = DwmSetWindowAttribute(
-            hwnd,
-            DWMWA_BORDER_COLOR,
-            &border,
-            size_of::<u32>() as u32,
-        );
+        // The window frame colour is set by `set_window_frame` for the chosen look (none in
+        // Glass); setting one here as well would override it with a dark outline.
         let _ = GetDpiForWindow(hwnd);
     }
 }
@@ -2724,6 +2764,7 @@ fn main() {
                         glass: None,
                         glass_tried: false,
                         framed_look: None,
+                        glass_edge: None,
                         slider_drag: None,
                         slider_sent: None,
                         slider_active: false,
