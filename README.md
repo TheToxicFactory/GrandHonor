@@ -87,12 +87,12 @@ HONOR PC Manager shows ads, feels heavy and often misbehaves — yet without it 
 ## Use
 
 - **Click the tray icon** to open the panel; click anywhere else or press `Esc` to close it.
-- **Right-click** for a quick menu: power mode, Eye comfort, microphone, Quit.
+- **Right-click** for a quick menu: power mode, Eye comfort, microphone, Open, Quit.
 - GrandHonor must keep running for the Fn keys, gestures and charge limits. Closing the panel keeps it running; **System → Quit** stops it completely.
 
 | Key | Action |
 |---|---|
-| `Fn+P` | Economy → Balanced → Performance |
+| `Fn+P` | Efficiency → Balanced → Performance |
 | `F7` | Microphone on / off (all microphones, with the key's LED) |
 | `F8` | Camera on / off |
 | `F12` | Screen snip |

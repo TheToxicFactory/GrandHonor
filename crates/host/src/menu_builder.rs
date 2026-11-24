@@ -22,7 +22,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use windows::Win32::UI::WindowsAndMessaging::{
-    MB_ICONERROR, MB_ICONINFORMATION, MB_OK, MessageBoxW,
+    MB_ICONERROR, MB_ICONINFORMATION, MB_OK, MB_SETFOREGROUND, MB_TOPMOST, MessageBoxW,
 };
 use windows_core::HSTRING;
 
@@ -102,7 +102,15 @@ impl MenuBuilder {
             items: self.items,
             language: Some(grandhonor_core::locale::language().code().to_string()),
             appearance: Some(settings::appearance().code().to_string()),
+            notice: None,
+            notice_is_error: false,
+            job_running: crate::updater::checking(),
         };
+        let mut state = state;
+        if let Some((text, error)) = PANEL_NOTICE.lock().ok().and_then(|mut s| s.take()) {
+            state.notice = Some(text);
+            state.notice_is_error = error;
+        }
         let cmds = self
             .commands
             .lock()
@@ -268,9 +276,9 @@ pub fn build_panel_snapshot(ctx: &HostContext) -> (PanelState, HashMap<u32, Acti
             t("Режим питания", "Power mode", "电源模式"),
             None, false, false,
             Some(t(
-                "Режим Windows; от сети и от батареи запоминается отдельно",
-                "The Windows mode; kept separately on the charger and on battery",
-                "Windows 电源模式；接通电源与使用电池分别记忆",
+                "Режим Windows, отдельно для зарядки и батареи. Fn+P переключает по кругу",
+                "The Windows mode, kept separately on the charger and on battery. Fn+P cycles it",
+                "Windows 电源模式，接通电源与使用电池分别记忆。Fn+P 循环切换",
             )),
         );
         let mut modes = power.add_container("", "segment");
@@ -362,7 +370,7 @@ pub fn build_panel_snapshot(ctx: &HostContext) -> (PanelState, HashMap<u32, Acti
         t("Драйверы", "Drivers", "驱动"),
         Some(t(
             "Обновления и резервная копия драйверов",
-            "HONOR catalogue updates and driver store backup",
+            "Driver updates and backup",
             "HONOR 目录更新与驱动备份",
         )),
         upd_badge.as_deref(),
@@ -382,7 +390,7 @@ pub fn build_panel_snapshot(ctx: &HostContext) -> (PanelState, HashMap<u32, Acti
         Some("settings"),
     );
     cfg.add_item(
-        t("Уведомления и запуск", "Notifications & Startup", "通知与启动"),
+        t("Уведомления и запуск", "Notifications and startup", "通知与启动"),
         None,
         false,
         false,
@@ -395,7 +403,7 @@ pub fn build_panel_snapshot(ctx: &HostContext) -> (PanelState, HashMap<u32, Acti
             settings::set_notifications_enabled(!settings::notifications_enabled());
         })),
         Some(t(
-            "Сообщать о микрофоне, камере и режимах",
+            "Вместо экранных подсказок, когда они выключены, и для важных событий зарядки",
             "Tell me about mic, camera and mode changes",
             "提示麦克风、摄像头和模式变化",
         )),
@@ -567,17 +575,27 @@ fn build_update_section(menu: &mut SubMenu<'_>, on_quit: Arc<dyn Fn() + Send + S
                     Ok(()) => quit(),
                     Err(err) => show_error_box(&err),
                 })),
-                Some(t(
-                    "Скачать с GitHub, сверить SHA-256 и установить. При сбое вернётся текущая версия",
-                    "Download from GitHub, verify SHA-256 and install. A failure restores this version",
-                    "从 GitHub 下载并校验 SHA-256 后安装；失败时自动恢复当前版本",
-                )),
+                Some(if installed {
+                    t(
+                        "Скачать, проверить и установить. Если что-то пойдёт не так, вернётся текущая версия",
+                        "Download, check and install. If anything goes wrong, this version comes back",
+                        "下载、校验并安装；如有问题会恢复当前版本",
+                    )
+                } else {
+                    t(
+                        "Портативная версия: скачайте установщик со страницы выпусков на GitHub",
+                        "Portable copy: download the setup from the GitHub releases page",
+                        "便携版：请从 GitHub 发布页面下载安装程序",
+                    )
+                }),
                 None, Some("cta"), installed, false,
             );
         }
         other => {
+            let checking = updater::checking();
             let help = match other {
-                Some(State::UpToDate) => format!("{} {version}", t("Установлена последняя версия", "Latest version installed:", "已是最新版本")),
+                _ if checking => t("Проверка…", "Checking…", "正在检查…").to_string(),
+                Some(State::UpToDate) => format!("{} {version}", t("Установлена последняя версия", "Latest version installed", "已是最新版本")),
                 Some(State::Failed(err)) => format!(
                     "{}: {err}",
                     t("Не удалось проверить", "Check failed", "检查失败")
@@ -585,10 +603,10 @@ fn build_update_section(menu: &mut SubMenu<'_>, on_quit: Arc<dyn Fn() + Send + S
                 _ => format!("{} {version}", t("Сейчас установлена", "Installed:", "当前版本")),
             };
             menu.add_command_ex(
-                t("Проверить обновление", "Check for updates", "检查更新"),
+                t("Проверить обновление GrandHonor", "Check for GrandHonor updates", "检查 GrandHonor 更新"),
                 Some(Box::new(updater::check)),
                 Some(&help),
-                None, Some("card"), true, false,
+                None, Some("card"), !checking, false,
             );
         }
     }
@@ -600,11 +618,15 @@ fn build_update_section(menu: &mut SubMenu<'_>, on_quit: Arc<dyn Fn() + Send + S
                 Ok(()) => on_quit(),
                 Err(err) => show_error_box(&err),
             })),
-            Some(t(
-                "Если новая версия работает плохо: вернуть сохранённую прошлую",
-                "If the new version misbehaves: restore the stored previous one",
-                "如果新版本有问题：恢复已保存的旧版本",
-            )),
+            Some(if installed {
+                t(
+                    "Если новая версия работает плохо: вернуть сохранённую прошлую",
+                    "If the new version misbehaves: restore the stored previous one",
+                    "如果新版本有问题：恢复已保存的旧版本",
+                )
+            } else {
+                t("Доступно в установленной версии", "Available in the installed version", "仅安装版可用")
+            }),
             None, Some("card"), installed, false,
         );
     }
@@ -631,15 +653,19 @@ fn build_app_profiles_section(menu: &mut SubMenu<'_>) {
     );
     for app in apps.clone() {
         let rest: Vec<String> = apps.iter().filter(|a| **a != app).cloned().collect();
+        let key = format!("app-profile/{app}");
+        let armed = is_armed(&key);
         page.add_command_ex(
             app.trim_end_matches(".exe"),
             Some(Box::new(move || {
-                settings::set_app_profiles(&rest);
-                crate::hw::app_profiles::settings_changed();
+                if confirmed(&key) {
+                    settings::set_app_profiles(&rest);
+                    crate::hw::app_profiles::settings_changed();
+                }
             })),
-            Some(&app),
+            Some(if armed { t("Нажмите ещё раз, чтобы убрать из списка", "Click again to remove it", "再次点击以移除") } else { &app }),
             Some(t("Убрать", "Remove", "移除")),
-            None, true, false,
+            Some(if armed { "danger" } else { "card" }), true, false,
         );
     }
     let current = apps.clone();
@@ -797,26 +823,26 @@ fn build_battery_section(menu: &mut SubMenu<'_>) {
         (
             BatteryMode::Disabled,
             t("Без лимита", "Unrestricted", "无限制"),
-            t("до 100%", "Up to 100%", "上限 100%"),
-            t("Полный заряд батареи", "Full charge cycle", "允许正常充满"),
+            t("до 100%", "up to 100%", "上限 100%"),
+            t("Полный заряд батареи", "Full battery charge", "充满电池"),
         ),
         (
             BatteryMode::Home,
             t("Дом", "Home", "居家"),
             "40–70%",
-            t("Долгая работа от сети", "Maximises battery lifespan", "长效插电保护"),
+            t("Долгая работа от сети", "Long hours on the charger", "长时间插电使用"),
         ),
         (
             BatteryMode::Office,
             t("Офис", "Office", "办公"),
             "70–90%",
-            t("Баланс автономности", "Balanced daily protection", "均衡续航与寿命"),
+            t("Баланс автономности", "Balanced battery life", "均衡续航"),
         ),
         (
             BatteryMode::Travel,
             t("Поездки", "Travel", "出行"),
             "95–100%",
-            t("Быстрая подзарядка", "Top-up protection", "出行高电量模式"),
+            t("Быстрая подзарядка", "Quick top-up", "快速补电"),
         ),
     ];
 
@@ -935,7 +961,7 @@ fn build_battery_section(menu: &mut SubMenu<'_>) {
 
 fn build_performance_section(menu: &mut SubMenu<'_>, on_mode_changed: Arc<dyn Fn() + Send + Sync>) {
     menu.add_item(
-        t("Режим HONOR", "HONOR power profile", "HONOR 性能配置"),
+        t("Режим HONOR", "HONOR mode", "HONOR 模式"),
         None,
         false,
         false,
@@ -988,10 +1014,10 @@ fn build_performance_section(menu: &mut SubMenu<'_>, on_mode_changed: Arc<dyn Fn
         })),
         Some(t(
             "Только от сети и при заряде от 20%",
-            "Charger and 20% battery required",
+            "Only on the charger with at least 20% battery",
             "需接通电源且电量不低于 20%",
         )),
-        Some("Fn+P"),
+        None,
         Some("switch"),
         true,
         active,
@@ -1050,15 +1076,24 @@ fn build_device_check(menu: &mut SubMenu<'_>) {
                 None, Some("card"), true, false,
             );
             let (id, name) = (device.instance_id.clone(), device.name.clone());
+            let key = format!("rollback/{id}");
+            let armed = is_armed(&key);
             dev.add_command_ex(
                 t("Откатить драйвер", "Roll back driver", "回退驱动程序"),
                 Some(Box::new(move || {
+                    if !confirmed(&key) {
+                        return;
+                    }
                     let result = devices::rollback_driver(&id);
                     devices::invalidate();
                     report_repair(&name, result);
                 })),
-                Some(t("Вернуть драйвер, стоявший до последнего обновления", "Go back to the driver used before the last update", "恢复上次更新前的驱动程序")),
-                None, Some("card"), true, false,
+                Some(if armed {
+                    t("Нажмите ещё раз, чтобы откатить", "Click again to roll back", "再次点击以回退")
+                } else {
+                    t("Вернуть драйвер, стоявший до последнего обновления", "Go back to the driver used before the last update", "恢复上次更新前的驱动程序")
+                }),
+                None, Some("danger"), true, false,
             );
         }
     }
@@ -1093,14 +1128,20 @@ fn build_device_check(menu: &mut SubMenu<'_>) {
             t("Если сеть не находится или постоянно отключается", "When networks are not found or keep dropping", "找不到网络或频繁断开时"),
         ),
     ] {
+        let key = format!("radio/{radio:?}");
+        let armed = is_armed(&key);
         page.add_command_ex(
             label,
             Some(Box::new(move || {
+                // The connection drops for a few seconds: ask once more.
+                if !confirmed(&key) {
+                    return;
+                }
                 let result = devices::restart_radio(radio);
                 devices::invalidate();
                 report_repair(label, result);
             })),
-            Some(help),
+            Some(if armed { t("Нажмите ещё раз: связь пропадёт на несколько секунд", "Click again: the connection drops for a few seconds", "再次点击：连接将中断几秒") } else { help }),
             None,
             None,
             true,
@@ -1333,13 +1374,13 @@ fn build_keyboard_section(menu: &mut SubMenu<'_>, schedule: Arc<BacklightSchedul
     // The same seven choices as HONOR PC Manager (settingMenu_keyboard.xml: 5, 10, 15, 30, 60,
     // 300 s and never), all sent with the firmware's idle-timeout command.
     let timeouts: [(u16, &str); 7] = [
-        (0, t("Всегда", "Never", "常亮")),
-        (5, t("5с", "5s", "5秒")),
-        (10, t("10с", "10s", "10秒")),
-        (15, t("15с", "15s", "15秒")),
-        (30, t("30с", "30s", "30秒")),
-        (60, t("1м", "1m", "1分")),
-        (300, t("5м", "5m", "5分")),
+        (0, t("Никогда", "Never", "从不")),
+        (5, t("5 с", "5 s", "5 秒")),
+        (10, t("10 с", "10 s", "10 秒")),
+        (15, t("15 с", "15 s", "15 秒")),
+        (30, t("30 с", "30 s", "30 秒")),
+        (60, t("1 мин", "1 min", "1 分钟")),
+        (300, t("5 мин", "5 min", "5 分钟")),
     ];
     let mut timeout_seg = menu.add_container("", "segment");
     for (secs, label) in timeouts {
@@ -1366,11 +1407,10 @@ fn build_keyboard_section(menu: &mut SubMenu<'_>, schedule: Arc<BacklightSchedul
     }
 
     menu.add_separator();
-    menu.add_item(t("Расписание", "Schedule", "定时计划"), None, false, false, None);
     let sched_enabled = settings::backlight_schedule_enabled();
     let sched_toggle = schedule.clone();
     menu.add_command_ex(
-        t("Включить по расписанию", "Schedule enabled", "启用计划"),
+        t("Подсветка по расписанию", "Backlight schedule", "背光计划"),
         Some(Box::new(move || {
             let on = !settings::backlight_schedule_enabled();
             settings::set_backlight_schedule_enabled(on);
@@ -1379,15 +1419,18 @@ fn build_keyboard_section(menu: &mut SubMenu<'_>, schedule: Arc<BacklightSchedul
             crate::osd::show(if on { Icon::KeyboardLight } else { Icon::KeyboardOff }, text, None);
         })),
         Some(t(
-            "Автоматически меняет подсветку в заданные часы",
-            "Automatically adjusts keyboard light during configured hours",
-            "在设定时段自动切换键盘背光",
+            "Включает и выключает подсветку в заданные часы",
+            "Turns the backlight on and off at set hours",
+            "在设定时段开关键盘背光",
         )),
-        Some(t("Авто", "Auto", "自动")),
+        None,
         Some("switch"),
         true,
         sched_enabled,
     );
+    if !sched_enabled {
+        return;
+    }
 
     let on_hour = settings::backlight_on_hour();
     let off_hour = settings::backlight_off_hour();
@@ -1578,18 +1621,18 @@ fn build_touchpad_section(menu: &mut SubMenu<'_>) {
             TouchpadEdgeGesture::Brightness,
             t("Яркость (левый край)", "Brightness (left edge)", "亮度（左边缘）"),
             t(
-                "Свайп вверх/вниз вдоль левого края тачпада.",
-                "Slide vertically along the left touchpad edge.",
-                "沿触控板左边缘上下滑动调节亮度。",
+                "Проведите вверх или вниз у левого края",
+                "Slide up or down along the left edge",
+                "沿左边缘上下滑动",
             ),
         ),
         (
             TouchpadEdgeGesture::Volume,
             t("Громкость (правый край)", "Volume (right edge)", "音量（右边缘）"),
             t(
-                "Свайп вверх/вниз вдоль правого края тачпада.",
-                "Slide vertically along the right touchpad edge.",
-                "沿触控板右边缘上下滑动调节音量。",
+                "Проведите вверх или вниз у правого края",
+                "Slide up or down along the right edge",
+                "沿右边缘上下滑动",
             ),
         ),
     ] {
@@ -1607,7 +1650,7 @@ fn build_touchpad_section(menu: &mut SubMenu<'_>) {
                 }
             })),
             Some(tip),
-            Some("HID"),
+            None,
             Some("switch"),
             true,
             enabled,
@@ -1615,18 +1658,63 @@ fn build_touchpad_section(menu: &mut SubMenu<'_>) {
     }
 }
 
-pub fn show_error_box(msg: &str) {
-    let text = HSTRING::from(msg);
-    let title = HSTRING::from("GrandHonor");
-    unsafe {
-        MessageBoxW(None, &text, &title, MB_OK | MB_ICONERROR);
+/// The action waiting for a second click (key, when it was armed).
+static ARMED: Mutex<Option<(String, std::time::Instant)>> = Mutex::new(None);
+const CONFIRM_WINDOW: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// True when `key` was clicked once within the last 5 s (the control then asks again).
+fn is_armed(key: &str) -> bool {
+    ARMED.lock().ok().is_some_and(|a| a.as_ref().is_some_and(|(k, at)| k == key && at.elapsed() < CONFIRM_WINDOW))
+}
+
+/// Two-step confirmation for actions that are hard to undo: the first click arms the control
+/// (its label asks to click again), the second within 5 s runs it.
+fn confirmed(key: &str) -> bool {
+    let Ok(mut armed) = ARMED.lock() else { return true };
+    if armed.as_ref().is_some_and(|(k, at)| k == key && at.elapsed() < CONFIRM_WINDOW) {
+        *armed = None;
+        true
+    } else {
+        *armed = Some((key.to_string(), std::time::Instant::now()));
+        false
     }
 }
 
-fn show_info_box(msg: &str) {
+thread_local! {
+    /// True on the panel's IPC thread while one of its actions runs.
+    static IN_PANEL_ACTION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// The message the last panel action left (text, is error), shown once as a banner.
+static PANEL_NOTICE: Mutex<Option<(String, bool)>> = Mutex::new(None);
+
+/// Runs a panel action so that its error and info messages go into the panel (a message box
+/// would take the focus and close the panel, or hide behind it).
+pub fn run_panel_action(action: &ActionFn) {
+    IN_PANEL_ACTION.with(|f| f.set(true));
+    action();
+    IN_PANEL_ACTION.with(|f| f.set(false));
+}
+
+fn report(msg: &str, error: bool) {
+    if IN_PANEL_ACTION.with(|f| f.get()) {
+        if let Ok(mut slot) = PANEL_NOTICE.lock() {
+            *slot = Some((msg.to_string(), error));
+        }
+        return;
+    }
     let text = HSTRING::from(msg);
     let title = HSTRING::from("GrandHonor");
+    let icon = if error { MB_ICONERROR } else { MB_ICONINFORMATION };
     unsafe {
-        MessageBoxW(None, &text, &title, MB_OK | MB_ICONINFORMATION);
+        MessageBoxW(None, &text, &title, MB_OK | icon | MB_TOPMOST | MB_SETFOREGROUND);
     }
+}
+
+pub fn show_error_box(msg: &str) {
+    report(msg, true);
+}
+
+fn show_info_box(msg: &str) {
+    report(msg, false);
 }

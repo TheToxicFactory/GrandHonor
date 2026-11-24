@@ -56,16 +56,34 @@ fn set_state(state: State) {
     }
 }
 
-/// Asks GitHub for the latest release and remembers the answer for the panel.
+static CHECKING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// True while a check runs (the panel shows "Checking…" and asks again shortly).
+pub fn checking() -> bool {
+    CHECKING.load(std::sync::atomic::Ordering::Acquire)
+}
+
+/// Asks GitHub for the latest release on a background thread (up to 15 s) and remembers the
+/// answer for the panel; the panel stays usable meanwhile.
 pub fn check() {
-    set_state(match fetch_latest() {
-        Ok(Some(release)) => State::Available(release),
-        Ok(None) => State::UpToDate,
-        Err(err) => {
-            crate::log::error(&format!("Update check failed: {err}"));
-            State::Failed(err)
-        }
+    use std::sync::atomic::Ordering;
+    if CHECKING.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let spawned = std::thread::Builder::new().name("update-check".into()).spawn(|| {
+        set_state(match fetch_latest() {
+            Ok(Some(release)) => State::Available(release),
+            Ok(None) => State::UpToDate,
+            Err(err) => {
+                crate::log::error(&format!("Update check failed: {err}"));
+                State::Failed(err)
+            }
+        });
+        CHECKING.store(false, Ordering::Release);
     });
+    if spawned.is_err() {
+        CHECKING.store(false, Ordering::Release);
+    }
 }
 
 fn fetch_latest() -> Result<Option<Release>, String> {

@@ -219,7 +219,8 @@ fn serve_ipc(
             serde_json::to_vec(&snapshot)
         } else {
             if let Some(action) = commands.get(&cmd_id) {
-                action();
+                // Messages from the action become a banner in the next snapshot.
+                crate::menu_builder::run_panel_action(action);
             }
             if disposed.load(Ordering::Acquire) {
                 break;

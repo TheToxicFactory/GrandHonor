@@ -122,14 +122,14 @@ impl DriverPanel {
     pub fn build(&self, page: &mut SubMenu<'_>) {
         let this = self.clone();
         page.add_command_ex(
-            t("Проверить обновления", "Check for updates", "检查更新"),
+            t("Проверить драйверы", "Check for driver updates", "检查驱动更新"),
             Some(Box::new(move || this.scan())),
             Some(t(
-                "Сверить версии драйверов и BIOS с сервером HONOR",
-                "Compare installed drivers and BIOS against official HONOR servers",
-                "将已安装驱动和 BIOS 与 HONOR 官方服务器比较",
+                "Сверить драйверы и BIOS с сервером HONOR",
+                "Compare drivers and BIOS with HONOR's server",
+                "与 HONOR 服务器比对驱动和 BIOS",
             )),
-            Some("HONOR"),
+            None,
             Some("cta"),
             true,
             false,
@@ -184,7 +184,7 @@ impl DriverPanel {
 
         page.add_separator();
         page.add_item(
-            t("Резервная копия хранилища", "Driver store backup", "驱动备份与还原"),
+            t("Резервная копия драйверов", "Driver backup", "驱动备份"),
             None,
             false,
             false,
@@ -195,8 +195,8 @@ impl DriverPanel {
         tools.add_command_ex(
             t("Экспорт", "Export", "导出驱动"),
             Some(Box::new(move || this_exp.export())),
-            Some(t("Сохранить архив .zip", "Save driver .zip", "保存 .zip 备份")),
-            Some(".zip"),
+            Some(t("Сохранить все драйверы в архив", "Save all drivers to an archive", "将所有驱动保存为压缩包")),
+            None,
             Some("card"),
             true,
             false,
@@ -205,8 +205,8 @@ impl DriverPanel {
         tools.add_command_ex(
             t("Импорт", "Import", "导入驱动"),
             Some(Box::new(move || this_imp.import())),
-            Some(t("Восстановить через pnputil", "Install from .zip/.inf", "从 .zip/.inf 导入")),
-            Some("pnputil"),
+            Some(t("Вернуть драйверы из архива", "Restore drivers from an archive", "从压缩包还原驱动")),
+            None,
             Some("card"),
             true,
             false,
@@ -271,14 +271,14 @@ impl DriverPanel {
                 let u_inst = upd.clone();
                 let this_inst = self.clone();
                 item.add_command_ex(
-                    t("Установить обновление", "Install verified update", "安装已验证更新"),
+                    t("Установить обновление", "Install update", "安装更新"),
                     Some(Box::new(move || this_inst.install_direct(&u_inst, false))),
                     Some(t(
-                        "Скачивание в защищённую папку Windows Temp и проверка SHA-256 / подписи",
-                        "Downloads into protected Windows Temp, verifies SHA-256 and Authenticode",
-                        "下载到受保护目录并验证 SHA-256 和数字签名",
+                        "Перед установкой проверяются целостность и подпись HONOR",
+                        "Integrity and HONOR's signature are checked before installing",
+                        "安装前会校验完整性和 HONOR 签名",
                     )),
-                    Some("WinVerifyTrust"),
+                    None,
                     Some("cta"),
                     true,
                     false,
@@ -293,7 +293,7 @@ impl DriverPanel {
                         "Plug in the charger and save your work. Do not turn the laptop off while it updates; it restarts by itself.",
                         "请接通电源并保存工作。更新期间请勿关机，笔记本会自动重启。",
                     )),
-                    Some("BIOS"),
+                    None,
                     Some("banner"),
                     true,
                     false,
@@ -323,11 +323,11 @@ impl DriverPanel {
                 t("Сохранить проверенный пакет", "Save verified package", "保存已验证的软件包"),
                 Some(Box::new(move || this_save.save_package(&u_save))),
                 Some(t(
-                    "Скачать, проверить целостность и сохранить локально",
-                    "Download, verify integrity and choose destination folder",
-                    "下载并验证完整性后保存到本地",
+                    "Скачать, проверить и сохранить в выбранную папку",
+                    "Download, check and save to a folder you choose",
+                    "下载、校验并保存到所选文件夹",
                 )),
-                Some(".exe"),
+                None,
                 Some(if comp.id == BIOS_ID { "cta" } else { "card" }),
                 true,
                 false,

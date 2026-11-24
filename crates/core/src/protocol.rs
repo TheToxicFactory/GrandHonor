@@ -286,6 +286,15 @@ pub struct PanelState {
     /// Look chosen in System → Style: `graphite` (opaque OLED black) or `glass` (translucent).
     #[serde(default)]
     pub appearance: Option<String>,
+    /// The result of the last action when it needs words (an error or an explanation): the
+    /// panel shows it as a banner instead of a message box that would close the panel.
+    #[serde(default)]
+    pub notice: Option<String>,
+    #[serde(default)]
+    pub notice_is_error: bool,
+    /// A long job (update check) runs in the background: the panel asks again shortly.
+    #[serde(default)]
+    pub job_running: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

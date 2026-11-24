@@ -2,9 +2,9 @@
 
 [README](../README.md) · **Guide** · [FAQ](faq.md) · [Русский](guide.ru.md)
 
-GrandHonor lives in the tray, next to the clock. **Click** the **H** icon to open the panel; click anywhere else, press `Esc` or × to close it. **Hover** the icon to see the power mode and sensors, **right-click** it for a quick menu. Closing the panel does not stop GrandHonor — it has to keep running for the Fn keys, gestures and charge limits.
+GrandHonor lives in the tray, next to the clock. **Click** the **H** icon to open the panel; click anywhere else, press `Esc` or × to close it. **Hover** the icon to see the HONOR mode and sensors, **right-click** it for a quick menu (power mode, Eye comfort, microphone, Open, Quit). Closing the panel does not stop GrandHonor — it has to keep running for the Fn keys, gestures and charge limits.
 
-Every change shows a short notice above the taskbar. Turn notices off in **System → On-screen notices** (Windows notifications are used instead).
+Every change shows a short notice above the taskbar. Turn notices off in **System → On-screen notices**; reminders and battery notices then arrive as Windows notifications.
 
 <img src="images/osd.png" width="460" alt="On-screen notices">
 
@@ -14,9 +14,9 @@ Every change shows a short notice above the taskbar. Turn notices off in **Syste
 
 <img src="images/power.png" width="380" align="right" alt="Power tab">
 
-**Sensors** refresh twice a second while this tab is open: CPU temperature and power, battery temperature, both fans and the charge limit. The battery tile shows **Charging** (power going into the battery) on the charger and **Draw** (the whole laptop) on battery, with the charger's USB-C power. A dash means the firmware gave no fresh answer — GrandHonor never shows a guessed value.
+**Sensors** refresh twice a second while this tab is open: CPU temperature and power, battery temperature, both fans and the charge limit. The battery tile shows **Charging power** (going into the battery) on the charger, with the charger's USB-C power under it, and **Draw** (the whole laptop) on battery, with the percent. A dash means the firmware gave no fresh answer — GrandHonor never shows a guessed value.
 
-**Power mode** is the Windows switch from Settings → Power: Efficiency, Balanced, Performance. Windows remembers one mode for the charger and one for battery. `Fn+P` cycles Economy → Balanced → Performance.
+**Power mode** is the Windows switch from Settings → Power: Efficiency, Balanced, Performance. Windows remembers one mode for the charger and one for battery. `Fn+P` cycles Efficiency → Balanced → Performance.
 
 **Performance mode (HONOR)** switches the firmware profile; it needs the charger and at least 20 % battery.
 
@@ -24,10 +24,10 @@ Every change shows a short notice above the taskbar. Turn notices off in **Syste
 
 | Mode | Charges to | For |
 |---|---|---|
-| Home | 40–70 % | always on the charger |
+| Unrestricted | 100 % | full capacity every time |
+| Home | 40–70 % | long hours on the charger |
 | Office | 70–90 % | everyday use |
 | Travel | 95–100 % | trips |
-| Unrestricted | 100 % | full capacity every time |
 
 The title shows **battery health** (capacity against the original), charge cycles and how it changed over the months.
 
@@ -39,7 +39,7 @@ The title shows **battery health** (capacity against the original), charge cycle
 
 **Quiet nights** switch to Efficiency mode between two hours (23:00–07:00 by default) for quieter fans. In the morning the previous mode returns, unless you changed it during the night.
 
-**App profiles** — add a game or a heavy program: while it runs, GrandHonor uses Performance mode and the highest refresh rate, and puts both back when it closes.
+**App profiles** — add a game or a heavy program: while it runs, GrandHonor uses Performance mode and the highest refresh rate, and puts both back when it closes (also after a restart). To remove a program, click it twice.
 
 <br clear="right">
 
@@ -69,7 +69,7 @@ Colour settings use HONOR's own values measured for this panel and work in every
 
 - **Backlight level** — Off, Weak, Strong. The keyboard's own backlight key works as well.
 - **Idle timeout** — the backlight turns off after 5 s to 5 min without typing, or never.
-- **Schedule** — turn the backlight on and off at set hours.
+- **Backlight schedule** — turn the backlight on and off at set hours (the hours and level appear when it is on).
 - **Keys** — choose what the **Copilot** key and the **YOYO** key (`F11`) do: open GrandHonor, take a screenshot, switch the microphone, the power mode or Eye comfort, or open a program you pick. **Windows default** leaves the key as it is (a normal `F11` for YOYO).
 
 <br clear="right">
@@ -89,13 +89,13 @@ Colour settings use HONOR's own values measured for this panel and work in every
 
 ## 🧰 Drivers
 
-- **Check for updates** asks HONOR for drivers and BIOS for this exact laptop. Each package is verified (signature, SHA-256) before it can run; you can also save it.
+- **Check for driver updates** asks HONOR for drivers and BIOS for this exact laptop. Each package is verified (signature, SHA-256) before it can run; you can also save it.
 - **Install BIOS** works only on the charger with at least 30 % battery. Keep the laptop on: it restarts by itself.
-- **Driver store backup** — **Export** saves all installed drivers to a ZIP, **Import** puts them back.
+- **Driver backup** — **Export** saves all installed drivers to an archive, **Import** puts them back.
 - **Device check**
-  - Devices with an error are listed with the reason. Open one to **restart** it or **roll back its driver** to the previous version.
+  - Devices with an error are listed with the reason. Open one to **restart** it or **roll back its driver** to the previous version (click twice to confirm).
   - **SSD health**: wear, temperature, data written and hours.
-  - **Restart Bluetooth** or **Restart Wi-Fi** when a device will not connect.
+  - **Restart Bluetooth** or **Restart Wi-Fi** when a device will not connect (click twice: the connection drops for a few seconds).
   - **Scan for hardware changes**, as in Device Manager.
   - **System report** copies the model, BIOS, Windows version, battery, SSD, devices and the event log — attach it when you report a problem. **Event log** opens the log file.
 
@@ -106,9 +106,9 @@ Colour settings use HONOR's own values measured for this panel and work in every
 <img src="images/system.png" width="380" align="right" alt="System tab">
 
 - **Windows notifications**, **On-screen notices**, **Start with Windows**.
-- **Style** — **Graphite** (OLED black) or **Glass** (frosted: the desktop shows through the panel and the notices).
+- **Style** — **Graphite** (solid; OLED black in the dark theme) or **Glass** (frosted: the desktop shows through the panel and the notices).
 - **Language** — Auto, Русский, English, 中文.
-- **Check for updates** — downloads and installs a new GrandHonor from GitHub. If something fails, the previous version comes back by itself. **Roll back** returns to the stored previous version.
+- **Check for GrandHonor updates** — downloads and installs a new GrandHonor from GitHub. If something fails, the previous version comes back by itself. **Roll back** returns to the stored previous version. In the portable copy both are unavailable: download the setup instead.
 - **Export / Import settings** — a JSON file; importing restarts GrandHonor.
 - **Quit GrandHonor** — closes it completely: Fn keys and gestures stop until you start it again.
 
@@ -120,7 +120,7 @@ Colour settings use HONOR's own values measured for this panel and work in every
 
 | Key | What happens |
 |---|---|
-| `Fn+P` | Economy → Balanced → Performance |
+| `Fn+P` | Efficiency → Balanced → Performance |
 | `F7` | All microphones on / off, with the key's LED |
 | `F8` | Camera on / off (an app that tries to use a switched-off camera or microphone gets a notice) |
 | `F12` | Screen snip |

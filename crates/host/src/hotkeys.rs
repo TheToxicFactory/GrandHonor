@@ -187,7 +187,7 @@ unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARA
     unsafe { CallNextHookEx(Some(HHOOK::default()), code, wparam, lparam) }
 }
 
-/// Asks the tray window to run the key's action (also used for the YOYO firmware event).
+/// Asks the tray window to run the key's action.
 pub fn pressed(key: &str) {
     let hwnd = TRAY.load(Ordering::Acquire);
     let Some(index) = KEYS.iter().position(|k| *k == key) else { return };

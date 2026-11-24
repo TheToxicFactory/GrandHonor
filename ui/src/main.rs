@@ -142,7 +142,15 @@ struct Panel {
     path: Vec<String>,
     busy: bool,
     polling: bool,
-    pending_command: Option<u32>,
+    pending_command: Option<Pending>,
+    /// Bumped by every request; the slow-host timer compares it.
+    request_seq: u64,
+    /// No answer within the time limit: a banner says the host is slow.
+    host_slow: bool,
+    /// The panel lost focus while the host showed a dialog: take it back afterwards.
+    refocus_after_busy: bool,
+    /// The command whose control shows the busy state (only that one dims).
+    busy_command: Option<u32>,
     disconnected: bool,
     was_active: bool,
     focus: FocusHandle,
@@ -166,7 +174,20 @@ struct Panel {
     slider_active: bool,
     /// Track bounds from the last paint and the stop commands of the slider being dragged.
     slider_bounds: std::rc::Rc<std::cell::Cell<Option<Bounds<gpui::Pixels>>>>,
-    slider_commands: Vec<Option<u32>>,
+    /// Stop commands of the slider in the latest snapshot (filled while rendering).
+    slider_commands: std::rc::Rc<std::cell::RefCell<Vec<Option<u32>>>>,
+    /// Scroll position of every page, so "Back" returns to where you were.
+    scroll: HashMap<String, gpui::ScrollHandle>,
+}
+
+/// A command waiting for the host to be free.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Pending {
+    /// A control's command from the snapshot of this generation (ids change between snapshots,
+    /// so it is dropped when a newer snapshot arrived first).
+    Command { id: u32, generation: u64 },
+    /// A slider stop, resolved against the newest snapshot when it is sent.
+    Stop(usize),
 }
 
 enum Reply {
@@ -216,12 +237,24 @@ impl Panel {
     }
 
     fn slider_apply(&mut self, fraction: f32, cx: &mut Context<Self>) {
-        let stop = slider_stop(fraction, self.slider_commands.len());
-        if let Some(Some(cmd)) = self.slider_commands.get(stop).copied()
-            && self.slider_sent != Some(cmd)
-        {
-            self.slider_sent = Some(cmd);
-            self.request_latest(cmd, cx);
+        let count = self.slider_commands.borrow().len();
+        let stop = slider_stop(fraction, count);
+        if self.slider_sent != Some(stop as u32) {
+            self.slider_sent = Some(stop as u32);
+            self.request_stop(stop, cx);
+        }
+    }
+
+    /// Sends a slider stop now, or queues it (newest wins) while the host is busy; the stop is
+    /// looked up in the newest snapshot when it is sent.
+    fn request_stop(&mut self, stop: usize, cx: &mut Context<Self>) {
+        if self.busy || self.polling {
+            self.pending_command = Some(Pending::Stop(stop));
+        } else {
+            let cmd = self.slider_commands.borrow().get(stop).copied().flatten();
+            if let Some(cmd) = cmd {
+                self.request(cmd, cx);
+            }
         }
     }
 
@@ -232,7 +265,7 @@ impl Panel {
             return;
         }
         if let Some(fraction) = self.slider_drag {
-            let count = self.slider_commands.len().max(2);
+            let count = self.slider_commands.borrow().len().max(2);
             self.slider_drag = Some(slider_stop(fraction, count) as f32 / (count - 1) as f32);
             self.slider_apply(fraction, cx);
         }
@@ -243,16 +276,6 @@ impl Panel {
         cx.notify();
     }
 
-    /// Like `request`, but while another request is in flight the newest command waits and runs
-    /// next (older ones are dropped): a dragged slider sends its latest stop, not every one.
-    fn request_latest(&mut self, command: u32, cx: &mut Context<Self>) {
-        if self.busy || self.polling {
-            self.pending_command = Some(command);
-        } else {
-            self.request(command, cx);
-        }
-    }
-
     fn request(&mut self, command: u32, cx: &mut Context<Self>) {
         if self.busy || self.disconnected {
             return;
@@ -260,15 +283,41 @@ impl Panel {
         let telemetry_only = command == PANEL_TELEMETRY_COMMAND;
         if self.polling {
             if !telemetry_only {
-                self.pending_command.get_or_insert(command);
+                self.pending_command.get_or_insert(Pending::Command { id: command, generation: self.generation });
             }
             return;
         }
         self.polling = telemetry_only;
         self.busy = !telemetry_only;
         if self.busy {
-            cx.notify();
+            self.busy_command = Some(command);
+            // Quick commands never show a busy state; a slow one does after 250 ms.
+            let timer = cx.background_executor().clone();
+            cx.spawn(async move |panel, cx| {
+                timer.timer(Duration::from_millis(250)).await;
+                let _ = panel.update(cx, |panel, cx| {
+                    if panel.busy {
+                        cx.notify();
+                    }
+                });
+            })
+            .detach();
         }
+        // No answer in time: say so (the answer may still come).
+        self.request_seq += 1;
+        let seq = self.request_seq;
+        let limit = if telemetry_only { 4 } else { 10 };
+        let timer = cx.background_executor().clone();
+        cx.spawn(async move |panel, cx| {
+            timer.timer(Duration::from_secs(limit)).await;
+            let _ = panel.update(cx, |panel, cx| {
+                if panel.request_seq == seq && (panel.busy || panel.polling) {
+                    panel.host_slow = true;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
 
         let req = cx.background_executor().spawn(async move {
             if telemetry_only {
@@ -282,6 +331,7 @@ impl Panel {
             let _ = panel.update(cx, |panel, cx| {
                 panel.busy = false;
                 panel.polling = false;
+                panel.host_slow = false;
                 match result {
                     Ok(Reply::Panel(snapshot)) => {
                         if !panel.slider_active && panel.pending_command.is_none() {
@@ -312,7 +362,20 @@ impl Panel {
                             }
                             _ => snapshot.telemetry = panel.stable.apply(snapshot.telemetry),
                         }
+                        let job = snapshot.job_running;
                         panel.snapshot = Some(snapshot);
+                        if job {
+                            let timer = cx.background_executor().clone();
+                            cx.spawn(async move |panel, cx| {
+                                timer.timer(Duration::from_secs(1)).await;
+                                let _ = panel.update(cx, |panel, cx| {
+                                    if !panel.busy && !panel.polling {
+                                        panel.request(0, cx);
+                                    }
+                                });
+                            })
+                            .detach();
+                        }
                         let renamed = panel.selected().is_none();
                         while !panel.path.is_empty() && panel.selected().is_none() {
                             panel.path.pop();
@@ -341,19 +404,19 @@ impl Panel {
                     }
                     Ok(Reply::Telemetry(telemetry)) => {
                         if let Some(snapshot) = &mut panel.snapshot {
-                            // An answer older than what is shown (a slow WMI call) is dropped.
-                            if telemetry.sampled_ticks < snapshot.telemetry.sampled_ticks {
-                                return;
+                            // An answer older than what is shown (a slow WMI call) is dropped,
+                            // but a command waiting behind it still runs.
+                            let mut unchanged = true;
+                            if telemetry.sampled_ticks >= snapshot.telemetry.sampled_ticks {
+                                // Redraw only when a steadied reading changed.
+                                let telemetry = panel.stable.apply(telemetry);
+                                let mut old = snapshot.telemetry.clone();
+                                let mut new = telemetry.clone();
+                                old.sampled_ticks = None;
+                                new.sampled_ticks = None;
+                                unchanged = old == new;
+                                snapshot.telemetry = telemetry;
                             }
-                            // Redraw only when a steadied reading changed: identical samples
-                            // cost no frame.
-                            let telemetry = panel.stable.apply(telemetry);
-                            let mut old = snapshot.telemetry.clone();
-                            let mut new = telemetry.clone();
-                            old.sampled_ticks = None;
-                            new.sampled_ticks = None;
-                            let unchanged = old == new;
-                            snapshot.telemetry = telemetry;
                             if unchanged && panel.pending_command.is_none() {
                                 return;
                             }
@@ -361,8 +424,11 @@ impl Panel {
                     }
                     Err(_) => panel.disconnected = true,
                 }
-                if let Some(pending) = panel.pending_command.take() {
-                    panel.request(pending, cx);
+                match panel.pending_command.take() {
+                    Some(Pending::Command { id, generation }) if generation == panel.generation => panel.request(id, cx),
+                    Some(Pending::Command { .. }) => {} // the page changed under it
+                    Some(Pending::Stop(stop)) => panel.request_stop(stop, cx),
+                    None => {}
                 }
                 cx.notify();
             });
@@ -651,10 +717,20 @@ fn windows_accent_rgb() -> Option<(u32, u32, u32)> {
 }
 
 fn system_accent(dark: bool) -> u32 {
+    let blue = if dark { 0x0a84ff } else { 0x0071e3 };
     let Some((r, g, b)) = windows_accent_rgb() else {
         // No accent: Apple system blue.
-        return if dark { 0x0a84ff } else { 0x0071e3 };
+        return blue;
     };
+    // A grey or graphite accent would make an "on" switch look like an "off" one: below a
+    // little colour (HSL saturation), use the system blue instead.
+    let (max, min) = (r.max(g).max(b), r.min(g).min(b));
+    let lightness = (max + min) as f32 / 510.0;
+    let chroma = (max - min) as f32 / 255.0;
+    let saturation = if chroma == 0.0 { 0.0 } else { chroma / (1.0 - (2.0 * lightness - 1.0).abs()).max(1e-3) };
+    if saturation < 0.25 {
+        return blue;
+    }
 
     let tune = |ch: u32| -> u32 {
         if dark {
@@ -840,6 +916,9 @@ struct Ctx<'a> {
     /// Knob position of a slider being dragged.
     slider_drag: Option<f32>,
     slider_bounds: std::rc::Rc<std::cell::Cell<Option<Bounds<gpui::Pixels>>>>,
+    slider_commands: std::rc::Rc<std::cell::RefCell<Vec<Option<u32>>>>,
+    /// The command being run (its control alone shows the busy state).
+    busy_command: Option<u32>,
     /// Monotonic snapshot number: part of animated element ids, so a change restarts them.
     generation: u64,
 }
@@ -861,6 +940,10 @@ impl Render for Panel {
                     1,
                 )))
             });
+        }
+        if self.refocus_after_busy && !self.busy {
+            self.refocus_after_busy = false;
+            window.activate_window();
         }
         let palette = Palette::for_window(window, look);
         let root = div()
@@ -957,6 +1040,8 @@ impl Render for Panel {
             motion: &self.motion,
             slider_drag: self.slider_drag,
             slider_bounds: self.slider_bounds.clone(),
+            slider_commands: self.slider_commands.clone(),
+            busy_command: self.busy_command.filter(|_| self.busy),
             generation: self.generation,
         };
 
@@ -1155,6 +1240,22 @@ impl Render for Panel {
                     )),
             );
         }
+        if self.host_slow && !self.disconnected {
+            content = content.child(status_banner(
+                "\u{e916}",
+                t(
+                    "GrandHonor отвечает медленно, подождите…",
+                    "GrandHonor is taking a while, please wait…",
+                    "GrandHonor 响应较慢，请稍候…",
+                ),
+                false,
+                palette,
+            ));
+        }
+        if let Some(notice) = self.snapshot.as_ref().and_then(|s| s.notice.as_deref()) {
+            let error = self.snapshot.as_ref().is_some_and(|s| s.notice_is_error);
+            content = content.child(status_banner(if error { "\u{e7ba}" } else { "\u{e946}" }, notice, error, palette));
+        }
         if let Some(section) = self.selected() {
             if self.path.len() == 1 && section.kind.as_deref() == Some("battery") {
                 content = content.child(telemetry_overview(tel, self.disconnected, palette));
@@ -1230,11 +1331,14 @@ impl Render for Panel {
             }
         }
 
+        // Each page keeps its own scroll handle, so "Back" returns to the same place.
+        let scroll = self.scroll.entry(path_key.clone()).or_default().clone();
         let pane = div()
             .id(SharedString::from(format!("pane-{path_key}")))
             .flex_1()
             .min_h_0()
             .overflow_y_scroll()
+            .track_scroll(&scroll)
             .child(content.with_animation(
                 SharedString::from(format!("page-{path_key}")),
                 Animation::new(Duration::from_millis(260)).with_easing(ease_out),
@@ -1441,6 +1545,9 @@ fn render_row(item: &ControlItem, index: usize, prefix: &str, ctx: &Ctx, cx: &Co
     let name = item.text.clone();
     let entity = cx.entity().downgrade();
     let interactive = nested || (action.is_some() && !ctx.busy);
+    // A switch or action without a command is unavailable (for example in the portable copy):
+    // it looks dimmed instead of working-but-dead.
+    let unavailable = !nested && action.is_none() && matches!(kind, Some("switch" | "card" | "danger"));
     let row = if interactive {
         control(id, palette, move |_, cx| {
             let _ = entity.update(cx, |p, cx| {
@@ -1457,7 +1564,8 @@ fn render_row(item: &ControlItem, index: usize, prefix: &str, ctx: &Ctx, cx: &Co
         div().id(id).border_1().border_color(rgba(0x00000000))
     };
 
-    row.flex()
+    row.when(unavailable, |el| el.opacity(0.45))
+        .flex()
         .items_center()
         .justify_between()
         .gap_3()
@@ -1541,13 +1649,15 @@ fn render_cta(item: &ControlItem, index: usize, ctx: &Ctx, cx: &Context<Panel>) 
     let action = item.command;
     let id = ("cta", index);
     let entity = cx.entity().downgrade();
+    // Only the pressed button shows that it works; one without a command is unavailable.
+    let running = action.is_some() && ctx.busy_command == action;
     let button = if let Some(cmd) = action.filter(|_| !ctx.busy) {
         control(id, palette, move |_, cx| {
             let _ = entity.update(cx, |p, cx| p.request(cmd, cx));
         })
         .hover(|el| el.opacity(0.88))
     } else {
-        div().id(id).opacity(if ctx.busy { 0.6 } else { 1.0 })
+        div().id(id).opacity(if action.is_none() { 0.45 } else if running { 0.6 } else { 1.0 })
     };
     button
         .flex()
@@ -1575,7 +1685,25 @@ fn render_cta(item: &ControlItem, index: usize, ctx: &Ctx, cx: &Context<Panel>) 
                     el.child(div().text_size(px(11.5)).opacity(0.85).child(help))
                 }),
         )
-        .child(glyph(if ctx.busy { "\u{e916}" } else { "\u{e72a}" }, 13.))
+        .child(glyph(if running { "\u{e916}" } else { "\u{e72a}" }, 13.))
+}
+
+/// A one-line message above the page: an error (red) or information (accent).
+fn status_banner(icon: &'static str, text: &str, error: bool, palette: Palette) -> Div {
+    let colour = if error { palette.danger } else { palette.accent };
+    div()
+        .flex()
+        .items_center()
+        .gap_2()
+        .px(px(14.))
+        .py(px(10.))
+        .rounded(px(palette.radius))
+        .bg(rgba((colour & 0xFFFF_FF00) | 0x1F))
+        .text_size(px(12.5))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(rgba(if error { palette.danger } else { palette.text }))
+        .child(div().flex_none().text_color(rgba(colour)).child(glyph(icon, 13.)))
+        .child(div().flex_1().min_w_0().child(text.to_string()))
 }
 
 fn render_banner(item: &ControlItem, palette: Palette) -> Div {
@@ -1642,7 +1770,7 @@ fn render_two_col_grid(
                 })
                 .hover(move |el| el.bg(rgba(palette.hover)))
             } else {
-                div().id(id).border_1().border_color(rgba(0x00000000))
+                div().id(id).border_1().border_color(rgba(0x00000000)).when(cmd.is_none(), |el| el.opacity(0.45))
             };
             let flipped = ctx.motion.flipped.contains(&item_key(&container_key, child));
             let tile = palette
@@ -1843,6 +1971,8 @@ fn render_slider(container: &ControlItem, base_idx: usize, ctx: &Ctx, cx: &Conte
     let knob = if dragging { 20.0 } else { 18.0 };
     let enabled = !ctx.busy || dragging;
 
+    // The newest snapshot's stops, used when a queued stop is finally sent.
+    *ctx.slider_commands.borrow_mut() = commands.clone();
     let bounds_cell = ctx.slider_bounds.clone();
     let measure = gpui::canvas(move |bounds, _, _| bounds_cell.set(Some(bounds)), |_, _, _, _| {})
         .absolute()
@@ -1850,16 +1980,16 @@ fn render_slider(container: &ControlItem, base_idx: usize, ctx: &Ctx, cx: &Conte
         .right_0()
         .top_0()
         .bottom_0();
-    let down_commands = commands.clone();
-    let key_commands = commands.clone();
     let track = div()
         .id(("slider", base_idx))
         .relative()
         .h(px(28.))
         .mx(px(9.))
+        .rounded(px(8.))
         .cursor_pointer()
         .focusable()
         .tab_stop(true)
+        .focus(move |el| el.bg(rgba(palette.hover)))
         .child(measure)
         .child(div().absolute().left_0().right_0().top(px(12.)).h(px(4.)).rounded(px(2.)).bg(rgba(palette.seg_track)))
         .child(div().absolute().left_0().top(px(12.)).h(px(4.)).w(relative(fill)).rounded(px(2.)).bg(rgba(palette.accent)))
@@ -1880,7 +2010,6 @@ fn render_slider(container: &ControlItem, base_idx: usize, ctx: &Ctx, cx: &Conte
             el.on_mouse_down(
                 gpui::MouseButton::Left,
                 cx.listener(move |panel, ev: &gpui::MouseDownEvent, _, cx| {
-                    panel.slider_commands = down_commands.clone();
                     panel.slider_active = true;
                     panel.slider_sent = None;
                     panel.slider_move(ev.position.x, cx);
@@ -1888,15 +2017,19 @@ fn render_slider(container: &ControlItem, base_idx: usize, ctx: &Ctx, cx: &Conte
             )
             .on_mouse_up_out(gpui::MouseButton::Left, cx.listener(|panel, _, _, cx| panel.slider_finish(cx)))
             .on_key_down(cx.listener(move |panel, ev: &KeyDownEvent, _, cx| {
-                let step: isize = match ev.keystroke.key.as_str() {
-                    "left" => -1,
-                    "right" => 1,
+                // Step from where the knob is now (a queued step counts), not the last snapshot.
+                let last = count - 1;
+                let here = panel.slider_drag.map_or(selected, |f| slider_stop(f, count));
+                let next = match ev.keystroke.key.as_str() {
+                    "left" | "down" => here.saturating_sub(1),
+                    "right" | "up" => (here + 1).min(last),
+                    "home" => 0,
+                    "end" => last,
                     _ => return,
                 };
-                let next = (selected as isize + step).clamp(0, key_commands.len() as isize - 1) as usize;
-                if let Some(Some(cmd)) = key_commands.get(next).copied() {
-                    panel.request_latest(cmd, cx);
-                }
+                panel.slider_drag = Some(next as f32 / last as f32);
+                panel.request_stop(next, cx);
+                cx.notify();
                 cx.stop_propagation();
             }))
         });
@@ -2008,21 +2141,21 @@ fn telemetry_overview(telemetry: &TelemetrySummary, disconnected: bool, palette:
     // This tile is the battery's own power flow (BatteryStatus), not total system power:
     // charging = power going into the battery; on battery = what the whole laptop draws.
     // On the charger the system's own draw is not reported without a driver, so it is not shown.
-    let power = telemetry.power_watts.filter(|_| !disconnected);
+    // Fresh only, like every other reading: an old value shows a dash.
+    let power = telemetry.power_watts.filter(|_| live);
     let (power_title, power_state) = match power {
         Some(w) if w > 0.05 => (t("Мощность заряда", "Charging power", "充电功率"), t("в батарею", "into battery", "充入电池")),
         Some(w) if w < -0.05 => (t("Расход", "Draw", "耗电"), t("от батареи", "on battery", "电池供电")),
         Some(_) if telemetry.ac_online == Some(true) => (t("Не заряжается", "Not charging", "未充电"), t("от сети", "on AC", "接通电源")),
         _ => (t("Батарея", "Battery", "电池"), t("без нагрузки", "idle", "空闲")),
     };
-    let charger = telemetry
-        .charger_watts
-        .filter(|_| live)
-        .map(|w| format!(" · {w} {}", t("Вт зарядка", "W charger", "瓦充电器")))
-        .unwrap_or_default();
-    let power_note = power.map(|_| match telemetry.battery_percent {
-        Some(percent) => format!("{power_state} · {percent}%{charger}"),
-        None => format!("{power_state}{charger}"),
+    // The tile is narrow: on the charger its wattage replaces the percent (the percent is in
+    // the tray and in Windows anyway).
+    let charger = telemetry.charger_watts.filter(|_| live);
+    let power_note = power.map(|_| match (charger, telemetry.battery_percent) {
+        (Some(w), _) => format!("{w} {}", t("Вт зарядка", "W charger", "瓦充电器")),
+        (None, Some(percent)) => format!("{power_state} · {percent}%"),
+        (None, None) => power_state.to_string(),
     });
     let charge = (!disconnected && telemetry.charge_label != "?")
         .then(|| telemetry.charge_label.clone());
@@ -2561,8 +2694,12 @@ fn main() {
                     cx.observe_window_activation(window, move |panel: &mut Panel, window, _| {
                         if window.is_window_active() {
                             panel.was_active = true;
-                        } else if panel.was_active && !keep_open {
+                        } else if panel.was_active && !keep_open && !panel.busy {
+                            // While an action runs the host may show a file dialog or a
+                            // question: the panel stays and takes the focus back afterwards.
                             window.remove_window();
+                        } else if panel.busy {
+                            panel.refocus_after_busy = true;
                         }
                     })
                     .detach();
@@ -2573,6 +2710,10 @@ fn main() {
                         busy: false,
                         polling: false,
                         pending_command: None,
+                        request_seq: 0,
+                        host_slow: false,
+                        refocus_after_busy: false,
+                        busy_command: None,
                         disconnected: false,
                         was_active: false,
                         focus,
@@ -2587,7 +2728,8 @@ fn main() {
                         slider_sent: None,
                         slider_active: false,
                         slider_bounds: Default::default(),
-                        slider_commands: Vec::new(),
+                        slider_commands: Default::default(),
+                        scroll: HashMap::new(),
                         stable: Stabilizer::default(),
                     };
                     panel.request(0, cx);

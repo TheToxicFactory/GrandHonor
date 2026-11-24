@@ -643,7 +643,7 @@ fn cycle_profile(rt: &Arc<AppRuntime>) {
         let honor_on = apply_profile(next);
         (rt.ctx.on_update_tray_icon)();
         let (icon, text) = match next {
-            Profile::Economy => (Icon::Normal, t("Экономия", "Economy", "节能")),
+            Profile::Economy => (Icon::Normal, t("Экономия", "Efficiency", "能效")),
             Profile::Balanced => (Icon::Balanced, t("Баланс", "Balanced", "平衡")),
             Profile::Performance if honor_on => (Icon::Performance, t("Производительный", "Performance", "高性能")),
             Profile::Performance => (Icon::Performance, t("Производительный · без зарядки", "Performance · on battery", "高性能 · 电池供电")),
@@ -661,13 +661,13 @@ fn capture_started(rt: &Arc<AppRuntime>, device: crate::hw::privacy_watch::Devic
         Device::Microphone => (
             rt.mic_mute.is_muted() == Some(true),
             Icon::MicOff,
-            t("Микрофон выключен. Нажмите F7, чтобы включить", "Microphone is off. Press F7 to turn it on", "麦克风已关闭，按 F7 开启"),
+            t("Микрофон выключен · F7", "Microphone off · F7", "麦克风已关闭 · F7"),
             0,
         ),
         Device::Camera => (
             crate::hw::camera::get_camera_off() == Some(true),
             Icon::CameraOff,
-            t("Камера выключена. Нажмите F8, чтобы включить", "Camera is off. Press F8 to turn it on", "摄像头已关闭，按 F8 开启"),
+            t("Камера выключена · F8", "Camera off · F8", "摄像头已关闭 · F8"),
             1,
         ),
     };

@@ -297,8 +297,8 @@ begin
     Local('GrandHonor уже установлен в Program Files\GrandHonor. Выберите нужное действие:',
           'GrandHonor is already installed in Program Files\GrandHonor. Choose an action:'),
     True, False);
-  OperationPage.Add(Local('Восстановить отсутствующие или повреждённые файлы (проверка SHA-256)',
-                          'Repair missing or modified files (SHA-256 verification)'));
+  OperationPage.Add(Local('Восстановить отсутствующие или повреждённые файлы',
+                          'Repair missing or damaged files'));
   OperationPage.Add(Local('Переустановить приложение целиком',
                           'Reinstall all application files'));
   OperationPage.Add(Local('Удалить GrandHonor с компьютера',
