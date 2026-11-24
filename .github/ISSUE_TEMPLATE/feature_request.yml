@@ -1,0 +1,16 @@
+name: Idea / Предложение
+description: A feature you would like, or something from HONOR PC Manager you miss. / Функция, которую вы хотите, или то, чего не хватает после PC Manager.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would you like? / Что вы хотите?
+      description: Describe the feature and when you would use it. / Опишите функцию и когда вы бы ей пользовались.
+    validations:
+      required: true
+  - type: input
+    id: model
+    attributes:
+      label: Laptop model / Модель ноутбука
+      placeholder: HONOR MagicBook …

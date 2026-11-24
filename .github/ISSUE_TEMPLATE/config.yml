@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security problem / Проблема безопасности
+    url: https://github.com/TheToxicFactory/GrandHonor/security/advisories/new
+    about: Report it privately, not as a public issue. / Сообщите приватно, а не в открытом обращении.
+  - name: User guide / Руководство
+    url: https://github.com/TheToxicFactory/GrandHonor/blob/main/docs/guide.md
+    about: How every tab and key works. / Как работает каждая вкладка и клавиша.

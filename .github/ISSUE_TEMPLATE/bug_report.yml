@@ -1,0 +1,36 @@
+name: Bug report / Сообщить об ошибке
+description: Something does not work as described in the guide. / Что-то работает не так, как описано в руководстве.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for helping! Please check the [FAQ](https://github.com/TheToxicFactory/GrandHonor/blob/main/docs/faq.md) first.
+        Спасибо за помощь! Сначала загляните в [вопросы и решения](https://github.com/TheToxicFactory/GrandHonor/blob/main/docs/faq.ru.md).
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened? / Что произошло?
+      description: What you did, what you expected and what you saw. Screenshots help. / Что вы сделали, чего ждали и что увидели. Снимки экрана помогают.
+    validations:
+      required: true
+  - type: textarea
+    id: report
+    attributes:
+      label: System report / Отчёт о системе
+      description: Drivers → Device check → System report, then paste here. / Драйверы → Проверка устройств → Отчёт о системе, затем вставьте сюда.
+      render: text
+    validations:
+      required: true
+  - type: input
+    id: model
+    attributes:
+      label: Laptop model / Модель ноутбука
+      placeholder: HONOR MagicBook …
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before sending / Перед отправкой
+      options:
+        - label: I use the latest GrandHonor (System → Check for updates). / У меня последняя версия GrandHonor.
+          required: true

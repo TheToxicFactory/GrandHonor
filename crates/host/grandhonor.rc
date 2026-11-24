@@ -1,0 +1,31 @@
+1 ICON "../../Assets/GrandHonor.ico"
+1 24 "grandhonor.manifest"
+
+1 VERSIONINFO
+FILEVERSION 2,5,2,0
+PRODUCTVERSION 2,5,2,0
+FILEFLAGSMASK 0x3fL
+FILEFLAGS 0x0L
+FILEOS 0x40004L
+FILETYPE 0x1L
+FILESUBTYPE 0x0L
+BEGIN
+  BLOCK "StringFileInfo"
+  BEGIN
+    BLOCK "040904b0"
+    BEGIN
+      VALUE "CompanyName", "GrandHonor"
+      VALUE "FileDescription", "GrandHonor"
+      VALUE "FileVersion", "2.5.2.0"
+      VALUE "InternalName", "GrandHonor.exe"
+      VALUE "LegalCopyright", "Copyright (c) 2026 GrandHonor contributors (MIT)"
+      VALUE "OriginalFilename", "GrandHonor.exe"
+      VALUE "ProductName", "GrandHonor"
+      VALUE "ProductVersion", "2.5.2.0"
+    END
+  END
+  BLOCK "VarFileInfo"
+  BEGIN
+    VALUE "Translation", 0x409, 1200
+  END
+END

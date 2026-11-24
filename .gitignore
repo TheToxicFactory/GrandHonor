@@ -1,0 +1,14 @@
+# Build output
+/target/
+/ui/target/
+/dist/
+/obj/
+.vs/
+
+# Local only: notes for agents and developers, checks and tools (not published)
+/AGENTS.md
+/CLAUDE.md
+/dev/
+/tests/
+/tools/
+/.claude/
