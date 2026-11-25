@@ -119,7 +119,9 @@ impl DriverPanel {
         let this = self.clone();
         page.add_command_ex(
             t("Проверить драйверы", "Check for driver updates", "检查驱动更新"),
-            Some(Box::new(move || this.in_background(|p| p.scan()))),
+            Some(Box::new(move || {
+                this.in_background(|p| p.scan());
+            })),
             Some(t(
                 "Сверить драйверы и BIOS с сервером HONOR",
                 "Compare drivers and BIOS with HONOR's server",
@@ -127,7 +129,7 @@ impl DriverPanel {
             )),
             None,
             Some("cta"),
-            !installing(),
+            !busy(),
             false,
         );
 
@@ -190,7 +192,7 @@ impl DriverPanel {
         let this_exp = self.clone();
         tools.add_command_ex(
             t("Экспорт", "Export", "导出驱动"),
-            Some(Box::new(move || this_exp.in_background(|p| p.export()))),
+            Some(Box::new(move || this_exp.export())),
             Some(t("Сохранить все драйверы в архив", "Save all drivers to an archive", "将所有驱动保存为压缩包")),
             None,
             Some("card"),
@@ -200,7 +202,7 @@ impl DriverPanel {
         let this_imp = self.clone();
         tools.add_command_ex(
             t("Импорт", "Import", "导入驱动"),
-            Some(Box::new(move || this_imp.in_background(|p| p.import()))),
+            Some(Box::new(move || this_imp.import())),
             Some(t("Вернуть драйверы из архива", "Restore drivers from an archive", "从压缩包还原驱动")),
             None,
             Some("card"),
@@ -288,7 +290,7 @@ impl DriverPanel {
                     )),
                     None,
                     Some("cta"),
-                    !installing(),
+                    !busy(),
                     false,
                 );
             }
@@ -330,7 +332,7 @@ impl DriverPanel {
                         )),
                         None,
                         Some("cta"),
-                        !installing(),
+                        !busy(),
                         false,
                     );
                 }
@@ -342,7 +344,7 @@ impl DriverPanel {
                 t("Сохранить проверенный пакет", "Save verified package", "保存已验证的软件包"),
                 Some(Box::new(move || {
                     let u = u_save.clone();
-                    this_save.in_background(move |p| p.save_package(&u))
+                    this_save.in_background(move |p| p.save_package(&u));
                 })),
                 Some(t(
                     "Скачать, проверить и сохранить в выбранную папку",
@@ -422,7 +424,7 @@ impl DriverPanel {
 
     /// BIOS flashing is refused unless the charger is connected and the battery has 30 %:
     /// a power loss during the flash can leave the laptop unable to start.
-    fn install_bios(&self, update: &DriverUpdate) {
+    fn install_bios(&self, update: &DriverUpdate) -> bool {
         if !bios_power_ok() {
             self.set_message(
                 t(
@@ -432,19 +434,19 @@ impl DriverPanel {
                 )
                 .to_string(),
             );
-            return;
+            return false;
         }
-        self.install_direct(update, true);
+        self.install_direct(update, true)
     }
 
-    /// Downloading and installing takes minutes: it runs on its own thread so the panel stays
-    /// responsive; the result appears as the Drivers page message. The user already confirmed
-    /// with a second click.
     /// A check of the catalogue, a package download, an export or an import takes seconds to
     /// minutes: it runs on its own thread and the panel keeps asking until it is done.
-    fn in_background(&self, work: impl FnOnce(&DriverPanel) + Send + 'static) {
+    /// One driver job at a time (install, check, download, export, import): they share `BUSY`.
+    /// Returns false when nothing was started.
+    fn in_background(&self, work: impl FnOnce(&DriverPanel) + Send + 'static) -> bool {
         if BUSY.swap(true, Ordering::AcqRel) {
-            return;
+            self.set_message(t("Подождите: идёт другая операция с драйверами", "Please wait: another driver task is running", "请稍候：另一项驱动任务正在进行").to_string());
+            return false;
         }
         let this = self.clone();
         let spawned = std::thread::Builder::new().name("drivers-work".into()).spawn(move || {
@@ -453,33 +455,36 @@ impl DriverPanel {
         });
         if spawned.is_err() {
             BUSY.store(false, Ordering::Release);
+            return false;
         }
+        true
     }
 
+    /// Downloading and installing takes minutes; the user already confirmed with a second click.
     fn install_in_background(&self, update: DriverUpdate, bios: bool) {
-        if INSTALLING.swap(true, Ordering::AcqRel) {
+        if busy() {
+            self.set_message(t("Подождите: идёт другая операция с драйверами", "Please wait: another driver task is running", "请稍候：另一项驱动任务正在进行").to_string());
             return;
         }
-        let this = self.clone();
-        let spawned = std::thread::Builder::new().name("driver-install".into()).spawn(move || {
-            if bios {
-                this.install_bios(&update);
-            } else {
-                this.install_direct(&update, false);
-            }
+        INSTALLING.store(true, Ordering::Release);
+        let started = self.in_background(move |this| {
+            let ok = if bios { this.install_bios(&update) } else { this.install_direct(&update, false) };
             INSTALLING.store(false, Ordering::Release);
-            // The panel may be closed by now: the result is on the Drivers page.
-            crate::osd::notify(
-                crate::osd::Icon::Normal,
-                t("Установка завершена — итог на странице «Драйверы»", "Install finished — see the Drivers page", "安装已结束，结果见「驱动」页面"),
-            );
+            // The panel may be closed by now: say how it ended; details are on the Drivers page.
+            let (icon, text) = if ok {
+                (crate::osd::Icon::Normal, t("Драйвер установлен", "Driver installed", "驱动已安装"))
+            } else {
+                (crate::osd::Icon::Warning, t("Установка не удалась — подробности в «Драйверах»", "Install failed — see Drivers", "安装失败，详见「驱动」"))
+            };
+            crate::osd::notify(icon, text);
         });
-        if spawned.is_err() {
+        if !started {
             INSTALLING.store(false, Ordering::Release);
         }
     }
 
-    fn install_direct(&self, update: &DriverUpdate, bios: bool) {
+    /// Returns true when the installer ran and reported success.
+    fn install_direct(&self, update: &DriverUpdate, bios: bool) -> bool {
         let this = self.clone();
         let confirm = move |_: &str| -> bool {
             // The download can take minutes: check the power again right before flashing.
@@ -491,7 +496,7 @@ impl DriverPanel {
         };
 
         match download_and_run_verified_installer(update, confirm) {
-            Ok(None) => {}
+            Ok(None) => false,
             Ok(Some(code @ (0 | 3010 | 1641))) => {
                 self.scan();
                 self.set_message(if code == 3010 || code == 1641 {
@@ -509,6 +514,7 @@ impl DriverPanel {
                     )
                     .to_string()
                 });
+                true
             }
             Ok(Some(code)) => {
                 self.set_message(match grandhonor_core::locale::language() {
@@ -522,10 +528,12 @@ impl DriverPanel {
                         format!("The installer returned {code}.")
                     }
                 });
+                false
             }
             Err(err) => {
                 crate::log::error(&format!("Driver installation failed: {err}"));
                 self.set_message(err);
+                false
             }
         }
     }
@@ -540,8 +548,8 @@ impl DriverPanel {
         ) else {
             return;
         };
-        let res = export_drivers(&path);
-        self.apply_transfer_result(res, false);
+        // The dialog runs while the panel waits (it stays open); the export itself in the background.
+        self.in_background(move |p| p.apply_transfer_result(export_drivers(&path), false));
     }
 
     fn import(&self) {
@@ -552,8 +560,7 @@ impl DriverPanel {
         ) else {
             return;
         };
-        let res = import_drivers(&path);
-        self.apply_transfer_result(res, true);
+        self.in_background(move |p| p.apply_transfer_result(import_drivers(&path), true));
     }
 
     fn apply_transfer_result(&self, res: grandhonor_core::protocol::DriverTransferResult, imported: bool) {

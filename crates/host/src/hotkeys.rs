@@ -174,6 +174,8 @@ unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARA
         }
         if YOYO_ON.load(Ordering::Acquire)
             && info.vkCode == u32::from(VK_F11.0)
+            // F11 sent by a program (remote desktop, on-screen keyboard) is not the YOYO key.
+            && (info.flags.0 & windows::Win32::UI::WindowsAndMessaging::LLKHF_INJECTED.0) == 0
             && !(held(VK_CONTROL) || held(VK_MENU) || held(VK_SHIFT) || win_held())
         {
             if down && !YOYO_DOWN.swap(true, Ordering::AcqRel) {

@@ -111,6 +111,9 @@ fn notify_queue() -> &'static Mutex<std::collections::VecDeque<(String, String)>
     PENDING_NOTIFICATION.get_or_init(|| Mutex::new(std::collections::VecDeque::new()))
 }
 
+/// Whether HONOR Performance was allowed at the last power message (charger, 20 %).
+static PERFORMANCE_ALLOWED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
 static TRAY_RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// True in the tray host (not in a CLI helper): messages then become on-screen notices.
@@ -971,6 +974,16 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         WM_SETTINGCHANGE | WM_DWMCOLORIZATIONCOLORCHANGED => {
+            // Many programs broadcast WM_SETTINGCHANGE (environment, policy, locale): redraw
+            // only when the theme or the accent colour really changed.
+            static LOOK: Mutex<Option<(bool, (u8, u8, u8))>> = Mutex::new(None);
+            let look = (is_dark_theme(), read_system_accent_rgb());
+            if let Ok(mut last) = LOOK.lock() {
+                if *last == Some(look) {
+                    return LRESULT(0);
+                }
+                *last = Some(look);
+            }
             if let Ok(mut cache) = rt.icon_cache.lock() {
                 for (_, hicon) in cache.drain() {
                     unsafe {
@@ -1004,9 +1017,14 @@ unsafe extern "system" fn wnd_proc(
                     thread::spawn(crate::hw::battery_alerts::on_power_status);
                     crate::hw::night_mode::poke();
                     let rt_pw = rt_arc.clone();
-                    if can_enable_performance_mode().is_err() {
+                    // Windows sends this on every percent too. Restore the saved choice only
+                    // when HONOR Performance becomes possible again (plug-in, charge back to
+                    // 20 %), not on each message: Fn+P may have turned it off on purpose.
+                    let allowed = can_enable_performance_mode().is_ok();
+                    let was_allowed = PERFORMANCE_ALLOWED.swap(allowed, Ordering::AcqRel);
+                    if !allowed {
                         thread::spawn(move || disable_performance_mode(&rt_pw));
-                    } else {
+                    } else if !was_allowed {
                         thread::spawn(move || restore_performance(&rt_pw));
                     }
                 }

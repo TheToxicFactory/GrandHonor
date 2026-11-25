@@ -6,8 +6,7 @@ use std::path::PathBuf;
 use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::System::SystemInformation::{GetSystemDirectoryW, GetSystemWindowsDirectoryW};
 use windows::Win32::UI::Shell::{
-    FOLDERID_LocalAppData, FOLDERID_ProgramData, FOLDERID_ProgramFiles, FOLDERID_RoamingAppData, KF_FLAG_DEFAULT,
-    SHGetKnownFolderPath,
+    FOLDERID_ProgramData, FOLDERID_ProgramFiles, KF_FLAG_DEFAULT, SHGetKnownFolderPath,
 };
 use windows_core::GUID;
 
@@ -53,12 +52,40 @@ pub fn program_data() -> PathBuf {
     known(&FOLDERID_ProgramData, r"C:\ProgramData")
 }
 
-/// The user's `%APPDATA%` (roaming), from the profile, not the environment.
-pub fn roaming_app_data() -> PathBuf {
-    known(&FOLDERID_RoamingAppData, r"C:\Users\Public\GrandHonor-no-profile")
+/// The signed-in user's profile folder (`C:\Users\name`). Windows takes it from
+/// `HKLM\...\ProfileList`, which only administrators can change; the per-user shell folder
+/// settings (`HKCU\...\User Shell Folders`) behind `%APPDATA%` and `SHGetKnownFolderPath` can
+/// be rewritten by any program the user runs, so the elevated host does not use them.
+fn profile() -> PathBuf {
+    use windows::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows::Win32::Security::TOKEN_QUERY;
+    use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+    use windows::Win32::UI::Shell::GetUserProfileDirectoryW;
+    // Without a profile, a folder inside the protected ProgramData\GrandHonor.
+    let fallback = || program_data().join("GrandHonor").join("no-profile");
+    unsafe {
+        let mut token = HANDLE::default();
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token).is_err() {
+            return fallback();
+        }
+        let mut buf = [0u16; 512];
+        let mut len = buf.len() as u32;
+        let ok = GetUserProfileDirectoryW(token, Some(windows_core::PWSTR(buf.as_mut_ptr())), &mut len).is_ok();
+        let _ = CloseHandle(token);
+        let n = buf.iter().position(|c| *c == 0).unwrap_or(0);
+        if !ok || n == 0 {
+            return fallback();
+        }
+        PathBuf::from(String::from_utf16_lossy(&buf[..n]))
+    }
 }
 
-/// The user's `%LOCALAPPDATA%`, from the profile, not the environment.
+/// The user's roaming AppData (`C:\Users\name\AppData\Roaming`).
+pub fn roaming_app_data() -> PathBuf {
+    profile().join(r"AppData\Roaming")
+}
+
+/// The user's local AppData (`C:\Users\name\AppData\Local`).
 pub fn local_app_data() -> PathBuf {
-    known(&FOLDERID_LocalAppData, r"C:\Users\Public\GrandHonor-no-profile")
+    profile().join(r"AppData\Local")
 }

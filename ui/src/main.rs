@@ -363,12 +363,24 @@ impl Panel {
                         if job {
                             let timer = cx.background_executor().clone();
                             cx.spawn(async move |panel, cx| {
+                                // Ask again in a second; if a sensor poll or a command is in
+                                // flight just then, wait another 250 ms instead of giving up
+                                // (that answer would not carry the job's end).
                                 timer.timer(Duration::from_secs(1)).await;
-                                let _ = panel.update(cx, |panel, cx| {
-                                    if !panel.busy && !panel.polling {
-                                        panel.request(0, cx);
+                                for _ in 0..40 {
+                                    let sent = panel.update(cx, |panel, cx| {
+                                        if !panel.busy && !panel.polling {
+                                            panel.request(0, cx);
+                                            true
+                                        } else {
+                                            false
+                                        }
+                                    });
+                                    if !matches!(sent, Ok(false)) {
+                                        break;
                                     }
-                                });
+                                    timer.timer(Duration::from_millis(250)).await;
+                                }
                             })
                             .detach();
                         }

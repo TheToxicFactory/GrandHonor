@@ -750,9 +750,9 @@ fn build_cpu_profile_section(menu: &mut SubMenu<'_>) {
         t("Профиль процессора", "Processor profile", "处理器配置"),
         None, false, false,
         Some(t(
-            "Тихий — прохладнее и дольше от батареи, Мощный — быстрее отклик и выше частоты",
+            "Тихий — прохладнее и дольше от батареи, Быстрый — быстрее отклик и выше частоты",
             "Quiet runs cooler and longer on battery, Fast responds quicker with higher clocks",
-            "安静更凉爽、续航更长；强劲响应更快、频率更高",
+            "安静更凉爽、续航更长；快速响应更快、频率更高",
         )),
     );
     for (ac, title) in [
@@ -767,7 +767,7 @@ fn build_cpu_profile_section(menu: &mut SubMenu<'_>) {
             (None, t("Windows", "Windows", "Windows")),
             (Some(Profile::Quiet), t("Тихий", "Quiet", "安静")),
             (Some(Profile::Balanced), t("Баланс", "Balanced", "平衡")),
-            (Some(Profile::Performance), t("Мощный", "Fast", "强劲")),
+            (Some(Profile::Performance), t("Быстрый", "Fast", "快速")),
         ];
         for (profile, label) in options {
             seg.add_command_ex(
@@ -1774,7 +1774,12 @@ fn report(msg: &str, error: bool) {
     // jump over a game: an on-screen notice instead, and the text goes to the log.
     if crate::tray::host_running_here() {
         crate::log::info(&format!("Notice: {msg}"));
-        crate::osd::notify(if error { crate::osd::Icon::Warning } else { crate::osd::Icon::Normal }, msg);
+        let (icon, title) = if error {
+            (crate::osd::Icon::Warning, t("GrandHonor: ошибка", "GrandHonor: error", "GrandHonor：错误"))
+        } else {
+            (crate::osd::Icon::Normal, "GrandHonor")
+        };
+        crate::osd::notify_detail(icon, title, msg);
         return;
     }
     let text = HSTRING::from(msg);

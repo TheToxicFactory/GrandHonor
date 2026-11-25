@@ -304,7 +304,7 @@ fn enter() -> Saved {
     crate::log::info("App profile on");
     crate::osd::notify(
         crate::osd::Icon::Performance,
-        t("Профиль программы: производительность", "App profile: performance", "应用配置：高性能"));
+        t("Профиль программы: производительность", "App profile: performance", "应用配置：性能"));
     Saved { mode, rate }
 }
 

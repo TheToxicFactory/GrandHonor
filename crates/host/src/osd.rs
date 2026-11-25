@@ -120,6 +120,19 @@ pub fn notify(icon: Icon, text: &str) {
     }
 }
 
+/// A short title on screen and the full text as a Windows notification (when notifications
+/// are on): the 172 px plate cannot hold a whole error message.
+pub fn notify_detail(icon: Icon, title: &str, body: &str) {
+    if settings::osd_enabled() {
+        show(icon, title, None);
+    }
+    if (settings::notifications_enabled() || !settings::osd_enabled())
+        && let Some(f) = FALLBACK.get()
+    {
+        f(title, body);
+    }
+}
+
 /// Shows a notice for about 1.5 s. Non-blocking; does nothing when on-screen notices are off
 /// (used to confirm the user's own actions; background events use `notify`).
 pub fn show(icon: Icon, text: &str, level: Option<(u8, u8)>) {
