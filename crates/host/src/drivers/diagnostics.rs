@@ -7,12 +7,8 @@ use crate::menu_builder::SubMenu;
 use grandhonor_core::locale::t;
 use serde::Serialize;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use windows::Win32::UI::WindowsAndMessaging::{
-    IDYES, MB_DEFBUTTON2, MB_ICONINFORMATION, MB_ICONQUESTION, MB_OK, MB_SETFOREGROUND, MB_TOPMOST, MB_YESNO,
-    MessageBoxW,
-};
-use windows_core::HSTRING;
 
 const BIOS_ID: i32 = 23;
 
@@ -270,9 +266,21 @@ impl DriverPanel {
             if comp.id != BIOS_ID && upd.is_update {
                 let u_inst = upd.clone();
                 let this_inst = self.clone();
+                let key = format!("driver:{}", comp.id);
+                let armed = crate::menu_builder::is_armed(&key);
                 item.add_command_ex(
-                    t("Установить обновление", "Install update", "安装更新"),
-                    Some(Box::new(move || this_inst.install_direct(&u_inst, false))),
+                    if installing() {
+                        t("Установка…", "Installing…", "正在安装…")
+                    } else if armed {
+                        t("Нажмите ещё раз, чтобы установить", "Click again to install", "再次点击以安装")
+                    } else {
+                        t("Установить обновление", "Install update", "安装更新")
+                    },
+                    Some(Box::new(move || {
+                        if crate::menu_builder::confirmed(&key) {
+                            this_inst.install_in_background(u_inst.clone(), false);
+                        }
+                    })),
                     Some(t(
                         "Перед установкой проверяются целостность и подпись HONOR",
                         "Integrity and HONOR's signature are checked before installing",
@@ -301,9 +309,20 @@ impl DriverPanel {
                 if upd.is_update {
                     let u_bios = upd.clone();
                     let this_bios = self.clone();
+                    let armed = crate::menu_builder::is_armed("driver:bios");
                     item.add_command_ex(
-                        t("Установить BIOS", "Install BIOS update", "安装 BIOS 更新"),
-                        Some(Box::new(move || this_bios.install_bios(&u_bios))),
+                        if installing() {
+                            t("Установка…", "Installing…", "正在安装…")
+                        } else if armed {
+                            t("Нажмите ещё раз, чтобы обновить BIOS", "Click again to update the BIOS", "再次点击以更新 BIOS")
+                        } else {
+                            t("Установить BIOS", "Install BIOS update", "安装 BIOS 更新")
+                        },
+                        Some(Box::new(move || {
+                            if crate::menu_builder::confirmed("driver:bios") {
+                                this_bios.install_in_background(u_bios.clone(), true);
+                            }
+                        })),
                         Some(t(
                             "Только от сети и при заряде от 30%. Пакет проверяется по подписи и SHA-256",
                             "AC power and 30% charge required. Signature and SHA-256 are verified",
@@ -415,35 +434,36 @@ impl DriverPanel {
         self.install_direct(update, true);
     }
 
+    /// Downloading and installing takes minutes: it runs on its own thread so the panel stays
+    /// responsive; the result appears as the Drivers page message. The user already confirmed
+    /// with a second click.
+    fn install_in_background(&self, update: DriverUpdate, bios: bool) {
+        if INSTALLING.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let this = self.clone();
+        let spawned = std::thread::Builder::new().name("driver-install".into()).spawn(move || {
+            if bios {
+                this.install_bios(&update);
+            } else {
+                this.install_direct(&update, false);
+            }
+            INSTALLING.store(false, Ordering::Release);
+        });
+        if spawned.is_err() {
+            INSTALLING.store(false, Ordering::Release);
+        }
+    }
+
     fn install_direct(&self, update: &DriverUpdate, bios: bool) {
-        let confirm = |display_name: &str| -> bool {
+        let this = self.clone();
+        let confirm = move |_: &str| -> bool {
             // The download can take minutes: check the power again right before flashing.
             if bios && !bios_power_ok() {
-                show_power_refusal();
+                this.set_message(power_refusal().to_string());
                 return false;
             }
-            let prompt = match grandhonor_core::locale::language() {
-                grandhonor_core::locale::AppLanguage::Russian => {
-                    format!("Пакет проверен (подпись HONOR/поставщика действительна).\n\nЗапустить установщик «{display_name}»?")
-                }
-                grandhonor_core::locale::AppLanguage::Chinese => {
-                    format!("软件包数字签名有效。\n\n是否运行 {display_name} 安装程序？")
-                }
-                grandhonor_core::locale::AppLanguage::English => {
-                    format!("The downloaded package passed signature verification.\n\nRun the {display_name} installer?")
-                }
-            };
-            let prompt_h = HSTRING::from(prompt);
-            let title_h = HSTRING::from("GrandHonor");
-            let answer = unsafe {
-                MessageBoxW(
-                    None,
-                    &prompt_h,
-                    &title_h,
-                    MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2,
-                )
-            };
-            answer == IDYES
+            true
         };
 
         match download_and_run_verified_installer(update, confirm) {
@@ -550,13 +570,17 @@ fn bios_power_ok() -> bool {
         && status.BatteryLifePercent >= 30
 }
 
-fn show_power_refusal() {
-    let text = HSTRING::from(t(
+fn power_refusal() -> &'static str {
+    t(
         "Для обновления BIOS подключите зарядку; заряд должен быть не ниже 30%.",
         "Connect the charger; the battery must be at least 30% to update the BIOS.",
         "请接通电源，且电量需不低于 30% 才能更新 BIOS。",
-    ));
-    unsafe {
-        MessageBoxW(None, &text, &HSTRING::from("GrandHonor"), MB_OK | MB_ICONINFORMATION | MB_TOPMOST | MB_SETFOREGROUND);
-    }
+    )
+}
+
+static INSTALLING: AtomicBool = AtomicBool::new(false);
+
+/// True while a driver or BIOS package downloads and installs (the panel keeps asking).
+pub fn installing() -> bool {
+    INSTALLING.load(Ordering::Acquire)
 }

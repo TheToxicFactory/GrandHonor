@@ -103,7 +103,7 @@ impl MenuBuilder {
             language: Some(grandhonor_core::locale::language().code().to_string()),
             notice: None,
             notice_is_error: false,
-            job_running: crate::updater::checking() || crate::updater::installing(),
+            job_running: crate::updater::checking() || crate::updater::installing() || crate::drivers::diagnostics::installing(),
         };
         let mut state = state;
         if let Some((text, error)) = PANEL_NOTICE.lock().ok().and_then(|mut s| s.take()) {
@@ -562,7 +562,11 @@ fn build_update_section(menu: &mut SubMenu<'_>, on_quit: Arc<dyn Fn() + Send + S
                     let quit = quit.clone();
                     updater::start_update_in_background(release.clone(), move |result| match result {
                         Ok(()) => quit(),
-                        Err(err) => post_panel_error(&err),
+                        Err(err) => {
+                            // The panel may be closed by now: a notice that takes no focus too.
+                            post_panel_error(&err);
+                            crate::osd::notify(crate::osd::Icon::Warning, t("Обновление не установлено", "Update not installed", "更新未安装"));
+                        }
                     })
                 })),
                 Some(if updater::installing() {
@@ -808,7 +812,7 @@ fn build_presets_section(menu: &mut SubMenu<'_>) {
     }
     let keep = t("Не менять", "Keep", "不变");
     let owned = |list: &[(u32, &str)]| list.iter().map(|(id, l)| (*id, l.to_string())).collect::<Vec<_>>();
-    let modes = owned(&[(1, t("Экономия", "Efficiency", "能效")), (2, t("Баланс", "Balanced", "平衡")), (3, t("Максимум", "Best performance", "最佳性能"))]);
+    let modes = owned(&[(1, t("Экономия", "Efficiency", "能效")), (2, t("Баланс", "Balanced", "平衡")), (3, t("Производительность", "Performance", "性能"))]);
     let lights = owned(&[(1, t("Выкл.", "Off", "关闭")), (2, t("Слабая", "Weak", "弱")), (3, t("Сильная", "Strong", "强"))]);
     let screens = owned(&[(31, "30%"), (51, "50%"), (71, "70%"), (101, "100%")]);
     let hz_label = t("Гц", "Hz", "赫兹");
@@ -1712,13 +1716,13 @@ static ARMED: Mutex<Option<(String, std::time::Instant)>> = Mutex::new(None);
 const CONFIRM_WINDOW: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// True when `key` was clicked once within the last 5 s (the control then asks again).
-fn is_armed(key: &str) -> bool {
+pub(crate) fn is_armed(key: &str) -> bool {
     ARMED.lock().ok().is_some_and(|a| a.as_ref().is_some_and(|(k, at)| k == key && at.elapsed() < CONFIRM_WINDOW))
 }
 
 /// Two-step confirmation for actions that are hard to undo: the first click arms the control
 /// (its label asks to click again), the second within 5 s runs it.
-fn confirmed(key: &str) -> bool {
+pub(crate) fn confirmed(key: &str) -> bool {
     let Ok(mut armed) = ARMED.lock() else { return true };
     if armed.as_ref().is_some_and(|(k, at)| k == key && at.elapsed() < CONFIRM_WINDOW) {
         *armed = None;

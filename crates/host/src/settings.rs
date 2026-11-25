@@ -159,7 +159,7 @@ pub fn promote_tray_icon_once(exe: &std::path::Path) -> bool {
     }
     let root_key = OwnedRegKey(handle);
     // Explorer stores Program Files paths with the FOLDERID_ProgramFilesX64 GUID.
-    let program_files = std::env::var("ProgramW6432").or_else(|_| std::env::var("ProgramFiles")).unwrap_or_default();
+    let program_files = crate::known_dirs::program_files().to_string_lossy().into_owned();
     let expand = |p: &str| p.replacen("{6D809377-6AF0-444B-8957-A3773F02200E}", &program_files, 1);
     let ours = exe.to_string_lossy().to_lowercase();
     let mut found = false;

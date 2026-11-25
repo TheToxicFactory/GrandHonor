@@ -3,6 +3,7 @@
 mod cache;
 mod drivers;
 mod footprint;
+mod known_dirs;
 mod hotkeys;
 mod hw;
 mod log;

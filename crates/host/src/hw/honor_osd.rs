@@ -24,11 +24,7 @@ pub fn replaced() -> bool {
 }
 
 fn system32(exe: &str) -> PathBuf {
-    std::env::var_os("SystemRoot")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(r"C:\Windows"))
-        .join("System32")
-        .join(exe)
+    crate::known_dirs::system32().join(exe)
 }
 
 fn run(exe: &str, args: &[&str]) -> bool {

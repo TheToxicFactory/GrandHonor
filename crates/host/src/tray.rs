@@ -663,8 +663,8 @@ fn cycle_profile(rt: &Arc<AppRuntime>) {
         let (icon, text) = match next {
             Profile::Economy => (Icon::Normal, t("Экономия", "Efficiency", "能效")),
             Profile::Balanced => (Icon::Balanced, t("Баланс", "Balanced", "平衡")),
-            Profile::Performance if honor_on => (Icon::Performance, t("Производительный", "Performance", "高性能")),
-            Profile::Performance => (Icon::Performance, t("Производительный · без зарядки", "Performance · on battery", "高性能 · 电池供电")),
+            Profile::Performance if honor_on => (Icon::Performance, t("Производительный HONOR", "HONOR Performance", "HONOR 高性能")),
+            Profile::Performance => (Icon::Performance, t("Производительный HONOR · без зарядки", "HONOR Performance · on battery", "HONOR 高性能 · 电池供电")),
         };
         notice(&rt, icon, text, None);
     });

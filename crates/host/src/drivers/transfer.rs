@@ -138,7 +138,7 @@ pub fn import_cli(source_path: Option<&str>, result_id: Option<&str>) -> i32 {
 pub fn export_drivers(archive_path: &Path) -> DriverTransferResult {
     let staging = make_staging_dir();
     let res = (|| {
-        create_protected_directory(&staging, false)?;
+        create_protected_directory(&staging, true)?;
         let staging_str = staging.to_string_lossy().into_owned();
         let (exit_code, output) = run_pnputil(&["/export-driver", "*", &staging_str])?;
         let packages = count_inf_files(&staging);
@@ -201,7 +201,7 @@ pub fn import_drivers(source_path: &Path) -> DriverTransferResult {
             )
         } else {
             let directory = if source_path.is_file() {
-                create_protected_directory(&staging, false)?;
+                create_protected_directory(&staging, true)?;
                 let mut budget = ArchiveBudget::default();
                 budget
                     .extract(source_path, &staging)
@@ -275,11 +275,7 @@ pub fn import_drivers(source_path: &Path) -> DriverTransferResult {
 }
 
 fn run_pnputil(args: &[&str]) -> Result<(i32, String), String> {
-    let sys_dir = std::env::var_os("SystemRoot")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(r"C:\Windows"))
-        .join("System32")
-        .join("pnputil.exe");
+    let sys_dir = crate::known_dirs::system32().join("pnputil.exe");
 
     crate::log::info(&format!("Running pnputil {}", args.join(" ")));
     let output = Command::new(&sys_dir)
@@ -380,5 +376,7 @@ fn unique_id() -> String {
 }
 
 fn make_staging_dir() -> PathBuf {
-    std::env::temp_dir().join(format!("GrandHonor-{}", unique_id()))
+    // Under C:\Windows\Temp, administrators and SYSTEM only: the user's own %TEMP% can be
+    // changed by any of the user's programs while pnputil writes there elevated.
+    crate::known_dirs::windows().join("Temp").join(format!("GrandHonor-drivers-{}", unique_id()))
 }

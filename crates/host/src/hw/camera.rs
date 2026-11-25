@@ -12,11 +12,7 @@ static GATE: OnceLock<Mutex<()>> = OnceLock::new();
 /// HONOR's software; when that is gone the driver still honours it, so GrandHonor treats a
 /// missing value as "on" and creates it when you switch.
 fn privacy_driver_present() -> bool {
-    std::env::var_os("SystemRoot")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::path::PathBuf::from(r"C:\Windows"))
-        .join(r"System32\RsDMFTNB.dll")
-        .is_file()
+    crate::known_dirs::system32().join("RsDMFTNB.dll").is_file()
 }
 
 pub fn get_camera_off() -> Option<bool> {

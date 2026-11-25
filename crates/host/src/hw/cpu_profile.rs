@@ -215,6 +215,11 @@ fn restore_all(saved: &Saved) {
 pub fn apply() -> bool {
     let Some(scheme) = ActiveScheme::get() else { return false };
     let mut saved = load_saved();
+    // Values saved by 2.5.4 are positional: rewrite them keyed by setting at once, so a
+    // later change of `ROWS` cannot put them into the wrong settings.
+    if !saved.is_empty() && settings::cpu_profile_original().is_some_and(|t| !t.contains('=')) {
+        store_saved(&saved);
+    }
     let (ac_profile, dc_profile) = (chosen(true), chosen(false));
     if ac_profile.is_none() && dc_profile.is_none() {
         restore_all(&saved);

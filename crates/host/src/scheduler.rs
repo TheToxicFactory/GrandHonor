@@ -134,10 +134,7 @@ fn is_trusted_sid(sid_str: &str) -> bool {
 }
 
 pub fn install_root() -> PathBuf {
-    let pf = std::env::var_os("ProgramFiles")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(r"C:\Program Files"));
-    pf.join("GrandHonor")
+    crate::known_dirs::program_files().join("GrandHonor")
 }
 
 pub fn is_installation_path() -> bool {

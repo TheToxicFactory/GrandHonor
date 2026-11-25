@@ -161,9 +161,7 @@ fn parse_release(body: &[u8], current: &str) -> Result<Option<Release>, String> 
 }
 
 pub fn rollback_dir() -> PathBuf {
-    std::env::var_os("ProgramData")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"))
+    crate::known_dirs::program_data()
         .join("GrandHonor")
         .join("rollback")
 }
@@ -203,7 +201,7 @@ pub fn rollback_version() -> Option<String> {
 }
 
 fn staging_dir(tag: &str) -> Result<PathBuf, String> {
-    let windows = std::env::var_os("SystemRoot").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
+    let windows = crate::known_dirs::windows();
     let dir = windows.join("Temp").join(format!("GrandHonor-{tag}-{}", std::process::id()));
     if dir.exists() {
         let _ = std::fs::remove_dir_all(&dir);

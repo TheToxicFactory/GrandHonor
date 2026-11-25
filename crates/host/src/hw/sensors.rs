@@ -276,7 +276,7 @@ pub fn build_telemetry(include_power_watts: bool) -> (String, TelemetrySummary) 
     let mode_label = if state.hunter_mode_active {
         "HUNTER".to_string()
     } else if state.performance_mode_active {
-        t("Производительный", "Performance", "高性能").to_string()
+        t("Производительный HONOR", "HONOR Performance", "HONOR 高性能").to_string()
     } else {
         t("Умный", "Smart", "智能").to_string()
     };
