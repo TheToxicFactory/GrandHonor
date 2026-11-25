@@ -1,8 +1,8 @@
 1 ICON "../Assets/GrandHonor.ico"
 
 1 VERSIONINFO
-FILEVERSION 2,5,3,0
-PRODUCTVERSION 2,5,3,0
+FILEVERSION 2,5,4,0
+PRODUCTVERSION 2,5,4,0
 FILEFLAGSMASK 0x3fL
 FILEFLAGS 0x0L
 FILEOS 0x40004L
@@ -15,12 +15,12 @@ BEGIN
     BEGIN
       VALUE "CompanyName", "GrandHonor"
       VALUE "FileDescription", "GrandHonor Panel"
-      VALUE "FileVersion", "2.5.3.0"
+      VALUE "FileVersion", "2.5.4.0"
       VALUE "InternalName", "GrandHonor.Panel.exe"
       VALUE "LegalCopyright", "Copyright (c) 2026 GrandHonor contributors (MIT)"
       VALUE "OriginalFilename", "GrandHonor.Panel.exe"
       VALUE "ProductName", "GrandHonor"
-      VALUE "ProductVersion", "2.5.3.0"
+      VALUE "ProductVersion", "2.5.4.0"
     END
   END
   BLOCK "VarFileInfo"
