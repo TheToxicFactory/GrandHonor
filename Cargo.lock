@@ -1914,11 +1914,9 @@ dependencies = [
  "embed-resource",
  "gpui",
  "grandhonor-core",
- "image",
  "raw-window-handle",
  "serde",
  "serde_json",
- "smallvec",
 ]
 
 [[package]]

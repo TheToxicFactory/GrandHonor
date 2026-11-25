@@ -110,7 +110,6 @@ Colour settings use HONOR's own values measured for this panel and work in every
 <img src="images/system.png" width="380" align="right" alt="System tab">
 
 - **Windows notifications**, **On-screen notices**, **Start with Windows**.
-- **Style** — **Graphite** (solid; OLED black in the dark theme) or **Glass** (frosted: the desktop shows through the panel and the notices).
 - **Language** — Auto, Русский, English, 中文.
 - **Check for GrandHonor updates** — downloads and installs a new GrandHonor from GitHub. If something fails, the previous version comes back by itself. **Roll back** returns to the stored previous version. In the portable copy both are unavailable: download the setup instead.
 - **Export / Import settings** — a JSON file; importing restarts GrandHonor.

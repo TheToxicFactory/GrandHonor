@@ -189,35 +189,6 @@ pub fn promote_tray_icon_once(exe: &std::path::Path) -> bool {
     found
 }
 
-/// Look of the panel and the on-screen notices (System → Style).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Appearance {
-    /// Opaque OLED black panel and HUD (default).
-    Graphite,
-    /// Translucent panel over Windows acrylic and a frosted HUD.
-    Glass,
-}
-
-impl Appearance {
-    pub fn code(self) -> &'static str {
-        match self {
-            Self::Graphite => "graphite",
-            Self::Glass => "glass",
-        }
-    }
-}
-
-pub fn appearance() -> Appearance {
-    match read_str("Appearance").as_deref() {
-        Some("glass") => Appearance::Glass,
-        _ => Appearance::Graphite,
-    }
-}
-
-pub fn set_appearance(value: Appearance) {
-    write_str("Appearance", Some(value.code()));
-}
-
 /// Smart charging (see `hw/smart_charge.rs`), default off.
 pub fn smart_charge_enabled() -> bool {
     read_u32("SmartCharge") == Some(1)

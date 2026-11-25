@@ -101,7 +101,6 @@ impl MenuBuilder {
             telemetry,
             items: self.items,
             language: Some(grandhonor_core::locale::language().code().to_string()),
-            appearance: Some(settings::appearance().code().to_string()),
             notice: None,
             notice_is_error: false,
             job_running: crate::updater::checking(),
@@ -480,19 +479,6 @@ pub fn build_panel_snapshot(ctx: &HostContext) -> (PanelState, HashMap<u32, Acti
         false,
     );
     cfg.add_separator();
-    cfg.add_item(t("Стиль", "Style", "风格"), None, false, false, None);
-    let style = settings::appearance();
-    let mut styles = cfg.add_container("", "segment");
-    for (choice, label) in [
-        (settings::Appearance::Graphite, t("Графит", "Graphite", "石墨")),
-        (settings::Appearance::Glass, t("Стекло", "Glass", "玻璃")),
-    ] {
-        styles.add_command_ex(
-            label,
-            Some(Box::new(move || settings::set_appearance(choice))),
-            None, None, Some("pill"), true, style == choice,
-        );
-    }
     cfg.add_item(t("Язык", "Language", "语言"), None, false, false, None);
     let chosen = settings::language_preference();
     let mut languages = cfg.add_container("", "segment");

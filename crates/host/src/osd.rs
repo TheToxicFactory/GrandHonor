@@ -1,7 +1,6 @@
 //! On-screen display: a rounded HUD slightly above the bottom centre of the screen for Fn keys
 //! and firmware events (microphone, camera, keyboard light, touchpad, Fn lock, Windows key,
-//! refresh rate, HONOR profile), in the look chosen in System → Style: Graphite (OLED black)
-//! or Glass (a frosted copy of the screen behind it, see `grandhonor_core::frost`).
+//! refresh rate, HONOR profile): an OLED-black plate with a lit rim and a soft shadow.
 //!
 //! Icons are the SVG files in `Assets/osd/` (24×24, 1.5 stroke, round caps), compiled in and
 //! drawn as vectors with GDI+ anti-aliasing into a per-pixel-alpha layered window; labels use
@@ -10,7 +9,7 @@
 //! notice is visible.
 
 use crate::settings;
-use grandhonor_core::frost::{Frosted, blur_shadow, frost};
+use grandhonor_core::shadow::blur_shadow;
 use std::cell::RefCell;
 use std::ffi::c_void;
 use std::sync::{OnceLock, mpsc};
@@ -334,44 +333,6 @@ unsafe extern "system" {
     fn GetDpiForMonitor(monitor: isize, kind: u32, x: *mut u32, y: *mut u32) -> i32;
 }
 
-/// Copies the screen under the plate and frosts it (Glass). Layered windows, this HUD
-/// included, are not part of a plain `BitBlt` copy, so a visible notice never sees itself.
-unsafe fn frosted_backdrop(x: i32, y: i32, side: i32) -> Option<Frosted> {
-    use windows::Win32::Graphics::Gdi::{BitBlt, SRCCOPY};
-    unsafe {
-        let screen = GetDC(None);
-        let dc = CreateCompatibleDC(Some(screen));
-        let header = BITMAPINFOHEADER {
-            biSize: size_of::<BITMAPINFOHEADER>() as u32,
-            biWidth: side,
-            biHeight: -side,
-            biPlanes: 1,
-            biBitCount: 32,
-            biCompression: BI_RGB.0,
-            ..Default::default()
-        };
-        let bmi = BITMAPINFO { bmiHeader: header, ..Default::default() };
-        let mut bits: *mut c_void = std::ptr::null_mut();
-        let result = match CreateDIBSection(Some(dc), &bmi, DIB_RGB_COLORS, &mut bits, None, 0) {
-            Ok(bitmap) => {
-                let old = SelectObject(dc, HGDIOBJ(bitmap.0));
-                let copied = BitBlt(dc, 0, 0, side, side, Some(screen), x, y, SRCCOPY).is_ok();
-                let out = copied.then(|| {
-                    let pixels = std::slice::from_raw_parts(bits as *const u8, (side * side * 4) as usize);
-                    frost(pixels, side as usize, side as usize, 4, 4, 1.6)
-                });
-                SelectObject(dc, old);
-                let _ = DeleteObject(HGDIOBJ(bitmap.0));
-                out
-            }
-            Err(_) => None,
-        };
-        let _ = DeleteDC(dc);
-        ReleaseDC(None, screen);
-        result
-    }
-}
-
 /// Inter SemiBold for labels, loaded once from the copy compiled into GrandHonor.exe.
 /// Chinese labels use Microsoft YaHei UI (Inter has no CJK glyphs).
 fn label_family(chinese: bool) -> *mut c_void {
@@ -420,11 +381,9 @@ fn label_family(chinese: bool) -> *mut c_void {
 }
 
 /// Draws the HUD into a premultiplied 32-bit bitmap positioned on the active monitor.
-/// Graphite: OLED-black plate. Glass: a frosted copy of what is behind, tinted dark or light
-/// by its brightness, with matching ink. Both carry a lit rim and a soft drop shadow.
+/// An OLED-black plate with white ink, a lit rim and a soft drop shadow.
 unsafe fn render(notice: &Notice) -> Option<Frame> {
     unsafe {
-        let glass = settings::appearance() == settings::Appearance::Glass;
         let monitor = MonitorFromWindow(GetForegroundWindow(), MONITOR_DEFAULTTONEAREST);
         let mut info = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
         let _ = GetMonitorInfoW(monitor, &mut info);
@@ -439,10 +398,7 @@ unsafe fn render(notice: &Notice) -> Option<Frame> {
         let plate_y = work.bottom - side - (LIFT * s).round() as i32;
         let pos = POINT { x: plate_x - margin, y: plate_y - margin };
 
-        // Glass needs the backdrop before anything is drawn, to pick its ink.
-        let frosted = if glass { frosted_backdrop(plate_x, plate_y, side) } else { None };
-        let light_glass = frosted.as_ref().is_some_and(|f| f.luminance() > 0.58);
-        let ink: u32 = if light_glass { 0x1D_1D_1F } else { 0xFF_FF_FF };
+        let ink: u32 = 0xFF_FF_FF;
 
         let header = BITMAPINFOHEADER {
             biSize: size_of::<BITMAPINFOHEADER>() as u32,
@@ -477,7 +433,7 @@ unsafe fn render(notice: &Notice) -> Option<Frame> {
         // 1. Drop shadow: the plate shape, lower by 8 px, blurred on the CPU.
         let shadow = rounded_rect(m, m + 8.0 * s, f, f, radius);
         let mut shadow_fill: *mut c_void = std::ptr::null_mut();
-        GdipCreateSolidFill(if glass { 0x59_00_00_00 } else { 0x73_00_00_00 }, &mut shadow_fill);
+        GdipCreateSolidFill(0x73_00_00_00, &mut shadow_fill);
         GdipFillPath(g, shadow_fill, shadow);
         GdipDeleteBrush(shadow_fill);
         GdipDeletePath(shadow);
@@ -486,45 +442,13 @@ unsafe fn render(notice: &Notice) -> Option<Frame> {
 
         // 2. The plate.
         let plate = rounded_rect(m + 0.5, m + 0.5, f - 1.0, f - 1.0, radius);
-        let mut filled = false;
-        if let Some(frost) = &frosted {
-            let mut small: *mut c_void = std::ptr::null_mut();
-            let mut texture: *mut c_void = std::ptr::null_mut();
-            let (fw, fh) = (frost.width as i32, frost.height as i32);
-            if GdipCreateBitmapFromScan0(fw, fh, fw * 4, PIXEL_FORMAT_32BPP_PARGB, frost.bgra.as_ptr() as *mut c_void, &mut small) == 0
-                && GdipCreateTexture(small, WRAP_TILE_FLIP_XY, &mut texture) == 0
-            {
-                GdipScaleTextureTransform(texture, f / fw as f32, f / fh as f32, MATRIX_ORDER_APPEND);
-                GdipTranslateTextureTransform(texture, m, m, MATRIX_ORDER_APPEND);
-                GdipFillPath(g, texture, plate);
-                filled = true;
-            }
-            if !texture.is_null() {
-                GdipDeleteBrush(texture);
-            }
-            if !small.is_null() {
-                GdipDisposeImage(small);
-            }
-            // Tint for legibility: smoked over dark content, milky over light content.
-            let mut tint: *mut c_void = std::ptr::null_mut();
-            GdipCreateSolidFill(if light_glass { 0x8A_F4_F4_F7 } else { 0x8C_16_16_1A }, &mut tint);
-            GdipFillPath(g, tint, plate);
-            GdipDeleteBrush(tint);
-        }
-        if !filled {
-            let mut fill: *mut c_void = std::ptr::null_mut();
-            // Graphite (and Glass without a backdrop copy): solid black, true OLED black.
-            GdipCreateSolidFill(if glass { 0xF2_1C_1C_20 } else { 0xFF_00_00_00 }, &mut fill);
-            GdipFillPath(g, fill, plate);
-            GdipDeleteBrush(fill);
-        }
+        let mut fill: *mut c_void = std::ptr::null_mut();
+        GdipCreateSolidFill(0xFF_00_00_00, &mut fill);
+        GdipFillPath(g, fill, plate);
+        GdipDeleteBrush(fill);
 
-        // 3. Lit rim: bright along the top edge, fading towards the bottom, like a glass edge.
-        let (rim_top, rim_bottom) = match (glass, light_glass) {
-            (true, true) => (0xE6_FF_FF_FF, 0x33_FF_FF_FF),
-            (true, false) => (0x80_FF_FF_FF, 0x14_FF_FF_FF),
-            _ => (0x47_FF_FF_FF, 0x14_FF_FF_FF),
-        };
+        // 3. Lit rim: bright along the top edge, fading towards the bottom.
+        let (rim_top, rim_bottom) = (0x47_FF_FF_FF_u32, 0x14_FF_FF_FF_u32);
         let mut rim_brush: *mut c_void = std::ptr::null_mut();
         let top = PointF { x: 0.0, y: m };
         let bottom = PointF { x: 0.0, y: m + f };
@@ -858,7 +782,6 @@ const PIXEL_OFFSET_HIGH_QUALITY: i32 = 2;
 const TEXT_ANTIALIAS: i32 = 4;
 const INTERPOLATION_HIGH_QUALITY_BILINEAR: i32 = 6;
 const WRAP_TILE_FLIP_XY: i32 = 3;
-const MATRIX_ORDER_APPEND: i32 = 1;
 const UNIT_PIXEL: i32 = 2;
 const LINE_CAP_ROUND: i32 = 2;
 const LINE_JOIN_ROUND: i32 = 2;
@@ -901,9 +824,6 @@ unsafe extern "system" {
     fn GdipDeleteGraphics(g: *mut c_void) -> i32;
     fn GdipFlush(g: *mut c_void, intention: i32) -> i32;
     fn GdipSetInterpolationMode(g: *mut c_void, mode: i32) -> i32;
-    fn GdipCreateTexture(image: *mut c_void, wrap: i32, brush: *mut *mut c_void) -> i32;
-    fn GdipScaleTextureTransform(brush: *mut c_void, sx: f32, sy: f32, order: i32) -> i32;
-    fn GdipTranslateTextureTransform(brush: *mut c_void, dx: f32, dy: f32, order: i32) -> i32;
     fn GdipCreateLineBrush(p1: *const PointF, p2: *const PointF, c1: u32, c2: u32, wrap: i32, brush: *mut *mut c_void) -> i32;
     fn GdipCreatePen2(brush: *mut c_void, width: f32, unit: i32, pen: *mut *mut c_void) -> i32;
     fn GdipNewPrivateFontCollection(collection: *mut *mut c_void) -> i32;

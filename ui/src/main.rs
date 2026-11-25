@@ -2,10 +2,10 @@
 
 use gpui::{
     Animation, AnimationExt, AnyElement, App, Application, Bounds, Context, Div, ElementId,
-    FocusHandle, Font, FontFallbacks, FontFeatures, FontStyle, FontWeight, ImageSource,
-    IntoElement, KeyDownEvent, ObjectFit, RenderImage, SharedString, Stateful, Styled, TitlebarOptions, Window, WindowAppearance,
+    FocusHandle, Font, FontFallbacks, FontFeatures, FontStyle, FontWeight,
+    IntoElement, KeyDownEvent, SharedString, Stateful, Styled, TitlebarOptions, Window, WindowAppearance,
     WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions, div, linear_color_stop,
-    img, linear_gradient, point, prelude::*, px, relative, rgb, rgba, size,
+    linear_gradient, point, prelude::*, px, relative, rgb, rgba, size,
 };
 use grandhonor_core::locale::{AppLanguage, set_language_override, t};
 use grandhonor_core::protocol::{
@@ -14,7 +14,6 @@ use grandhonor_core::protocol::{
 };
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
-mod glass;
 
 fn window_hwnd(window: &Window) -> Option<isize> {
     let handle = HasWindowHandle::window_handle(window).ok()?;
@@ -160,14 +159,9 @@ struct Panel {
     /// Tab the selection pill slides from, and a counter that restarts that slide.
     tab_from: Option<usize>,
     tab_generation: u64,
-    /// Frosted copy of the desktop behind the panel (Glass), see `glass.rs`.
-    glass: Option<Arc<RenderImage>>,
-    glass_tried: bool,
     stable: Stabilizer,
-    /// The look (and Glass edge colour) whose window frame colour is applied.
-    framed_look: Option<(Look, Option<u32>)>,
-    /// Average colour (0xRRGGBB) along the edge of the frosted backdrop.
-    glass_edge: Option<u32>,
+    /// Whether the window frame colour was applied for the dark (true) or light theme.
+    framed_dark: Option<bool>,
     /// Position (0–1) of the slider knob while it is dragged, and the stop last sent.
     slider_drag: Option<f32>,
     slider_sent: Option<u32>,
@@ -469,41 +463,20 @@ fn exchange<T: DeserializeOwned>(command: u32) -> io::Result<T> {
 
 // ---- Design system ---------------------------------------------------------------------------
 //
-// Two looks share one structure (System → Style): Graphite is opaque OLED black with hairline
-// separators; Glass lets the Windows acrylic backdrop through translucent, rim-lit surfaces.
+// Graphite: opaque OLED black (light grey in the light theme) with tone-separated surfaces.
 // Type is Inter (text) and Inter Display with tabular figures (readings), embedded in the panel.
 
 const TEXT_FONT: &str = "Inter";
 const DISPLAY_FONT: &str = "Inter Display";
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Look {
-    Graphite,
-    Glass,
-}
-
-impl Look {
-    fn from_code(code: Option<&str>) -> Self {
-        match code {
-            Some("glass") => Self::Glass,
-            _ => Self::Graphite,
-        }
-    }
-}
-
 /// Every colour is 0xRRGGBBAA.
 #[derive(Clone, Copy)]
 struct Palette {
-    glass: bool,
     dark: bool,
-    /// Window fill. In Glass it is the tint laid over the frosted desktop copy.
+    /// Window fill.
     backdrop: u32,
-    /// Glass only: opaque fill used until (or if) the desktop copy is unavailable.
-    glass_base: u32,
     /// Grouped-list and sensor surfaces.
     group: u32,
-    /// Glass rim; transparent in Graphite (no border, elevation comes from the surface tone).
-    rim: u32,
     elevated: u32,
     hover: u32,
     separator: u32,
@@ -519,24 +492,21 @@ struct Palette {
     seg_track: u32,
     seg_selected: u32,
     tab_selected: u32,
-    /// Corner radius of grouped surfaces: 14 px in Graphite, 20 px in Glass.
+    /// Corner radius of grouped surfaces.
     radius: f32,
 }
 
 impl Palette {
-    fn for_window(window: &Window, look: Look) -> Self {
+    fn for_window(window: &Window) -> Self {
         let dark = matches!(
             window.appearance(),
             WindowAppearance::Dark | WindowAppearance::VibrantDark
         );
         let accent = system_accent(dark);
         let base = Self {
-            glass: false,
             dark,
             backdrop: 0,
-            glass_base: if dark { 0x1c1c20ff } else { 0xeeeef3ff },
             group: 0,
-            rim: 0,
             elevated: 0,
             hover: 0,
             separator: 0,
@@ -554,11 +524,10 @@ impl Palette {
             tab_selected: 0,
             radius: 14.0,
         };
-        match (look, dark) {
-            (Look::Graphite, true) => Self {
+        if dark {
+            Self {
                 backdrop: 0x000000ff,
                 group: 0x141416ff,
-                rim: 0x00000000,
                 elevated: 0x262629ff,
                 hover: 0xffffff0d,
                 separator: 0xffffff14,
@@ -571,11 +540,11 @@ impl Palette {
                 seg_selected: 0x303034ff,
                 tab_selected: 0x1c1c1fff,
                 ..base
-            },
-            (Look::Graphite, false) => Self {
+            }
+        } else {
+            Self {
                 backdrop: 0xf2f2f7ff,
                 group: 0xffffffff,
-                rim: 0x00000000,
                 elevated: 0xf2f2f7ff,
                 hover: 0x0000000a,
                 separator: 0x3c3c432e,
@@ -588,64 +557,18 @@ impl Palette {
                 seg_selected: 0xffffffff,
                 tab_selected: 0xffffffff,
                 ..base
-            },
-            (Look::Glass, true) => Self {
-                glass: true,
-                backdrop: 0x15151aa3,
-                group: 0xffffff17,
-                rim: 0xffffff2e,
-                elevated: 0xffffff1f,
-                hover: 0xffffff0f,
-                separator: 0xffffff17,
-                text: 0xf7f7f9ff,
-                muted: 0xb4b4bbff,
-                tertiary: 0x9696a0ff,
-                track: 0xffffff29,
-                danger: 0xff7a72ff,
-                seg_track: 0xffffff10,
-                seg_selected: 0xffffff2b,
-                tab_selected: 0xffffff1c,
-                radius: 20.0,
-                ..base
-            },
-            (Look::Glass, false) => Self {
-                glass: true,
-                backdrop: 0xf7f7fab3,
-                group: 0xffffffa8,
-                rim: 0xffffffd9,
-                elevated: 0xffffffcc,
-                hover: 0x0000000a,
-                separator: 0x3c3c4324,
-                text: 0x1d1d1fff,
-                muted: 0x55555bff,
-                tertiary: 0x76767cff,
-                track: 0x7878802e,
-                danger: 0xd70015ff,
-                seg_track: 0x7676801a,
-                seg_selected: 0xffffffeb,
-                tab_selected: 0xffffffb8,
-                radius: 20.0,
-                ..base
-            },
+            }
         }
     }
 
-    /// A grouped surface: tone fill in Graphite; translucent fill with a lit rim in Glass.
+    /// A grouped surface: a tone fill, no border.
     fn surface<E: Styled>(&self, el: E) -> E {
-        if self.glass {
-            // A faint top-to-bottom sheen stands in for the specular edge of real glass.
-            let top = (self.group & 0xffff_ff00) | ((self.group & 0xff) + if self.dark { 0x08 } else { 0x10 }).min(0xff);
-            el.bg(linear_gradient(180., linear_color_stop(rgba(top), 0.), linear_color_stop(rgba(self.group), 1.)))
-                .border_1()
-                .border_color(rgba(self.rim))
-        } else {
-            el.bg(rgba(self.group))
-        }
+        el.bg(rgba(self.group))
     }
 
-    /// Segmented controls and tab pills: capsules in Glass, rounded rectangles in Graphite.
+    /// Segmented controls and tab pills: rounded rectangles.
     fn pill_radius(&self, height: f32) -> f32 {
-        if self.glass { height / 2.0 } else { (height * 0.3).round() }
+        (height * 0.3).round()
     }
 }
 
@@ -927,34 +850,17 @@ struct Ctx<'a> {
 
 impl Render for Panel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let look = Look::from_code(self.snapshot.as_ref().and_then(|s| s.appearance.as_deref()));
-        if look == Look::Glass && !self.glass_tried {
-            // Taken once, the first time Glass is shown (at open, or right after choosing it).
-            self.glass_tried = true;
-            self.glass = window_hwnd(window).and_then(glass::capture).map(|b| {
-                self.glass_edge = Some(edge_colour(&b.bgra, b.width as usize, b.height as usize));
-                let buffer = image::RgbaImage::from_raw(b.width, b.height, b.bgra);
-                Arc::new(RenderImage::new(smallvec::SmallVec::from_elem(
-                    image::Frame::new(buffer.unwrap_or_default()),
-                    1,
-                )))
-            });
-        }
-        // Windows keeps a 1 px frame (2 px at 150 %) around the window. With no colour it is
-        // black, so in Glass it takes the colour of the glass at the edge and disappears.
-        let palette_now = Palette::for_window(window, look);
-        let edge = (look == Look::Glass)
-            .then(|| self.glass_edge.map(|c| blend_over(c, palette_now.backdrop)))
-            .flatten();
-        if self.framed_look != Some((look, edge)) {
-            set_window_frame(window, look, edge);
-            self.framed_look = Some((look, edge));
+        // Windows keeps a 1 px frame around the window: a faint hairline in the theme's tone.
+        let dark = matches!(window.appearance(), WindowAppearance::Dark | WindowAppearance::VibrantDark);
+        if self.framed_dark != Some(dark) {
+            set_window_frame(window, dark);
+            self.framed_dark = Some(dark);
         }
         if self.refocus_after_busy && !self.busy {
             self.refocus_after_busy = false;
             window.activate_window();
         }
-        let palette = Palette::for_window(window, look);
+        let palette = Palette::for_window(window);
         let root = div()
             .id("grandhonor-flyout")
             .track_focus(&self.focus)
@@ -996,25 +902,8 @@ impl Render for Panel {
             // No own border or radius: Windows rounds the window (DWMWCP_ROUND) and draws a
             // 1 px frame in DWMWA_BORDER_COLOR. A second, inner rounded border never lines up
             // with the DWM corner and leaves broken corners.
-            .bg(rgba(if palette.glass { palette.glass_base } else { palette.backdrop }))
-            .overflow_hidden()
-            .when_some(self.glass.clone().filter(|_| palette.glass), |el, frost| {
-                // The image is 1/8 of the window; stretched, its outermost texel fades into the
-                // dark base. Drawing it one texel (8 px) larger on each side keeps that fade
-                // outside the window.
-                el.child(
-                    div()
-                        .absolute()
-                        .top(px(-8.))
-                        .left(px(-8.))
-                        .right(px(-8.))
-                        .bottom(px(-8.))
-                        .child(img(ImageSource::Render(frost)).size_full().object_fit(ObjectFit::Fill)),
-                )
-            })
-            .when(palette.glass, |el| {
-                el.child(div().absolute().size_full().bg(rgba(palette.backdrop)))
-            });
+            .bg(rgba(palette.backdrop))
+            .overflow_hidden();
 
         let Some(snapshot) = &self.snapshot else {
             return root.child(
@@ -1145,8 +1034,7 @@ impl Render for Panel {
                         .size_full()
                         .rounded(px(pill_radius))
                         .bg(rgba(palette.tab_selected))
-                        .when(palette.glass, |el| el.border_1().border_color(rgba(palette.rim)))
-                        .when(!palette.glass && !palette.dark, |el| el.shadow_sm()),
+                        .when(!palette.dark, |el| el.shadow_sm()),
                 )
                 .with_animation(
                     SharedString::from(format!("tab-pill-{}", self.tab_generation)),
@@ -1227,7 +1115,6 @@ impl Render for Panel {
             .mb_1()
             .p(px(3.))
             .rounded(px(pill_radius + 3.0))
-            .when(palette.glass, |el| palette.surface(el))
             .child(tab_row);
 
         // Scrollable body. The content of each page settles in once when it opens.
@@ -1681,7 +1568,7 @@ fn render_cta(item: &ControlItem, index: usize, ctx: &Ctx, cx: &Context<Panel>) 
         .gap_3()
         .px(px(16.))
         .py(px(12.))
-        .rounded(px(if palette.glass { 22.0 } else { 12.0 }))
+        .rounded(px(12.0))
         .bg(rgba(palette.accent))
         .text_color(rgba(palette.accent_text))
         .child(
@@ -1900,8 +1787,7 @@ fn render_segment_bar(container: &ControlItem, base_idx: usize, ctx: &Ctx, cx: &
                     .size_full()
                     .rounded(px(radius - 2.0))
                     .bg(rgba(palette.seg_selected))
-                    .when(palette.glass, |el| el.border_1().border_color(rgba(palette.rim)))
-                    .when(!palette.glass && !palette.dark, |el| el.shadow_sm()),
+                    .when(!palette.dark, |el| el.shadow_sm()),
             );
         track = track.child(if from.is_some() {
             pill.with_animation(
@@ -1953,7 +1839,6 @@ fn render_segment_bar(container: &ControlItem, base_idx: usize, ctx: &Ctx, cx: &
         .p(px(2.))
         .rounded(px(radius))
         .bg(rgba(palette.seg_track))
-        .when(palette.glass, |el| el.border_1().border_color(rgba(palette.rim)))
         .child(track)
 }
 
@@ -2417,67 +2302,24 @@ unsafe extern "system" {
     ) -> i32;
     fn MonitorFromPoint(pt: Point, dw_flags: u32) -> isize;
     fn GetMonitorInfoW(hmonitor: isize, lpmi: *mut MonitorInfo) -> i32;
-    fn GetDpiForWindow(hwnd: isize) -> u32;
     fn GetDpiForSystem() -> u32;
 }
 
-/// DWM draws a 1 px frame around the window. Glass has none (`DWMWA_COLOR_NONE`): the frosted
-/// desktop copy meets the desktop directly. Graphite keeps a faint hairline so black on black
-/// still has an edge.
-/// Average 0xRRGGBB of the outermost pixels of a top-down BGRA image.
-fn edge_colour(bgra: &[u8], w: usize, h: usize) -> u32 {
-    let (mut sum, mut n) = ([0u64; 3], 0u64);
-    for y in 0..h {
-        for x in 0..w {
-            if x == 0 || y == 0 || x + 1 == w || y + 1 == h {
-                let p = (y * w + x) * 4;
-                if let Some(px) = bgra.get(p..p + 3) {
-                    sum[0] += u64::from(px[2]);
-                    sum[1] += u64::from(px[1]);
-                    sum[2] += u64::from(px[0]);
-                    n += 1;
-                }
-            }
-        }
-    }
-    let n = n.max(1);
-    ((sum[0] / n) as u32) << 16 | ((sum[1] / n) as u32) << 8 | (sum[2] / n) as u32
-}
-
-/// `rgb` (0xRRGGBB) under the tint `rgba` (0xRRGGBBAA), as the panel draws them.
-fn blend_over(rgb: u32, rgba: u32) -> u32 {
-    let a = (rgba & 0xff) as f32 / 255.0;
-    let mix = |shift: u32| {
-        let under = ((rgb >> shift) & 0xff) as f32;
-        let over = ((rgba >> (shift + 8)) & 0xff) as f32;
-        (over * a + under * (1.0 - a)).round() as u32
-    };
-    mix(16) << 16 | mix(8) << 8 | mix(0)
-}
-
-fn set_window_frame(window: &Window, look: Look, glass_edge: Option<u32>) {
+/// DWM draws a 1 px frame around the window; a faint hairline keeps black on black an edge.
+fn set_window_frame(window: &Window, dark: bool) {
     const DWMWA_BORDER_COLOR: u32 = 34;
-    const DWMWA_COLOR_NONE: u32 = 0xFFFF_FFFE;
     let Some(hwnd) = window_hwnd(window) else { return };
-    let dark = matches!(window.appearance(), WindowAppearance::Dark | WindowAppearance::VibrantDark);
-    // COLORREF 0x00BBGGRR.
-    let color = match look {
-        // COLORREF is 0x00BBGGRR.
-        Look::Glass => glass_edge.map_or(DWMWA_COLOR_NONE, |c| (c & 0xff) << 16 | (c & 0xff00) | (c >> 16) & 0xff),
-        Look::Graphite if dark => 0x0026_2626,
-        Look::Graphite => 0x00d8_d6d4,
-    };
+    // COLORREF is 0x00BBGGRR.
+    let color: u32 = if dark { 0x0026_2626 } else { 0x00d8_d6d4 };
     unsafe {
         let _ = DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, &color, size_of::<u32>() as u32);
     }
 }
 
-fn setup_frosted_backdrop(window: &Window) {
+fn setup_window_chrome(window: &Window) {
     const DWMWA_USE_IMMERSIVE_DARK_MODE: u32 = 20;
     const DWMWA_WINDOW_CORNER_PREFERENCE: u32 = 33;
-    const DWMWA_SYSTEMBACKDROP_TYPE: u32 = 38;
     const DWMWCP_ROUND: u32 = 2;
-    const DWMSBT_TRANSIENTWINDOW: u32 = 3;
 
     let Ok(handle) = HasWindowHandle::window_handle(window) else {
         return;
@@ -2491,7 +2333,6 @@ fn setup_frosted_backdrop(window: &Window) {
         _ => 0,
     };
 
-    window.set_background_appearance(WindowBackgroundAppearance::Blurred);
     unsafe {
         let _ = DwmSetWindowAttribute(
             hwnd,
@@ -2505,15 +2346,6 @@ fn setup_frosted_backdrop(window: &Window) {
             &DWMWCP_ROUND,
             size_of::<u32>() as u32,
         );
-        let _ = DwmSetWindowAttribute(
-            hwnd,
-            DWMWA_SYSTEMBACKDROP_TYPE,
-            &DWMSBT_TRANSIENTWINDOW,
-            size_of::<u32>() as u32,
-        );
-        // The window frame colour is set by `set_window_frame` for the chosen look (none in
-        // Glass); setting one here as well would override it with a dark outline.
-        let _ = GetDpiForWindow(hwnd);
     }
 }
 
@@ -2717,12 +2549,12 @@ fn main() {
                 is_resizable: false,
                 is_minimizable: false,
                 is_movable: true,
-                window_background: WindowBackgroundAppearance::Blurred,
+                window_background: WindowBackgroundAppearance::Opaque,
                 app_id: Some("GrandHonor.Panel".into()),
                 ..Default::default()
             },
             |window, cx| {
-                setup_frosted_backdrop(window);
+                setup_window_chrome(window);
                 window.activate_window();
                 cx.new(|cx| {
                     let focus = cx.focus_handle();
@@ -2761,10 +2593,7 @@ fn main() {
                         generation: 0,
                         tab_from: None,
                         tab_generation: 0,
-                        glass: None,
-                        glass_tried: false,
-                        framed_look: None,
-                        glass_edge: None,
+                        framed_dark: None,
                         slider_drag: None,
                         slider_sent: None,
                         slider_active: false,

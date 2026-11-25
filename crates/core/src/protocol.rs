@@ -283,9 +283,6 @@ pub struct PanelState {
     /// Interface language code (`ru`, `en`, `zh`) the panel must use for its own strings.
     #[serde(default)]
     pub language: Option<String>,
-    /// Look chosen in System → Style: `graphite` (opaque OLED black) or `glass` (translucent).
-    #[serde(default)]
-    pub appearance: Option<String>,
     /// The result of the last action when it needs words (an error or an explanation): the
     /// panel shows it as a banner instead of a message box that would close the panel.
     #[serde(default)]

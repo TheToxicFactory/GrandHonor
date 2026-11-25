@@ -40,7 +40,7 @@ Fn 键、电池养护、风扇与传感器、屏幕色彩与驱动 —— 无需
 | ⌨️ **键盘** | 背光亮度、自动关闭与计划 · 自定义 **Copilot** 键与 **YOYO** 键功能 |
 | 🖱 **触控板** | 触觉反馈强度 · 边缘滑动调节亮度与音量 |
 | 🧰 **驱动** | 荣耀驱动与 BIOS 更新 · 驱动备份 · **设备检查**：修复异常设备、回退驱动、SSD 健康、重启蓝牙或 Wi-Fi、系统报告 |
-| 🎛 **日常** | 所有按键的屏幕提示 · `F7` 麦克风（带指示灯）· `F8` 摄像头 · `F12` 截图 · 托盘右键菜单 · 石墨或玻璃风格 · English、Русский、中文 |
+| 🎛 **日常** | 所有按键的屏幕提示 · `F7` 麦克风（带指示灯）· `F8` 摄像头 · `F12` 截图 · 托盘右键菜单 · English、Русский、中文 |
 
 ## 截图
 
@@ -51,7 +51,7 @@ Fn 键、电池养护、风扇与传感器、屏幕色彩与驱动 —— 无需
     <td><img src="docs/images/keyboard.png" alt="键盘"></td>
   </tr>
   <tr>
-    <td><img src="docs/images/glass-power.png" alt="玻璃风格"></td>
+    <td><img src="docs/images/drivers.png" alt="驱动"></td>
     <td><img src="docs/images/touchpad.png" alt="触控板"></td>
     <td><img src="docs/images/system.png" alt="系统"></td>
   </tr>

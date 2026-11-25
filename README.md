@@ -40,7 +40,7 @@ HONOR PC Manager shows ads, feels heavy and often misbehaves — yet without it 
 | ⌨️ **Keyboard** | Backlight level, auto-off and schedule · your own action for the **Copilot** and **YOYO** keys |
 | 🖱 **Touchpad** | Haptic strength · edge swipes for brightness and volume |
 | 🧰 **Drivers** | HONOR driver and BIOS updates · driver backup · **Device check**: fix devices with errors, roll back a driver, SSD health, restart Bluetooth or Wi-Fi, system report |
-| 🎛 **Everyday** | On-screen notices for every key · `F7` microphone with LED · `F8` camera · `F12` screen snip · right-click tray menu · Graphite or Glass style · English, Русский, 中文 |
+| 🎛 **Everyday** | On-screen notices for every key · `F7` microphone with LED · `F8` camera · `F12` screen snip · right-click tray menu · English, Русский, 中文 |
 
 ## Screenshots
 
@@ -56,12 +56,12 @@ HONOR PC Manager shows ads, feels heavy and often misbehaves — yet without it 
     <td align="center"><sub>Backlight and keys</sub></td>
   </tr>
   <tr>
-    <td><img src="docs/images/glass-power.png" alt="Glass style"></td>
+    <td><img src="docs/images/drivers.png" alt="Drivers tab"></td>
     <td><img src="docs/images/touchpad.png" alt="Touchpad tab"></td>
     <td><img src="docs/images/system.png" alt="System tab"></td>
   </tr>
   <tr>
-    <td align="center"><sub>Glass style</sub></td>
+    <td align="center"><sub>Drivers and device check</sub></td>
     <td align="center"><sub>Touchpad</sub></td>
     <td align="center"><sub>System</sub></td>
   </tr>
