@@ -173,7 +173,11 @@ pub fn rollback_dir() -> PathBuf {
 fn ensure_protected_root() -> Result<(), String> {
     let root = rollback_dir().parent().map(Path::to_path_buf).ok_or(grandhonor_core::locale::t("Нет папки ProgramData", "No ProgramData folder", "没有 ProgramData 文件夹"))?;
     if root.exists() && !is_path_protected(&root) {
-        crate::log::error(&format!("{} was not protected; recreating it", root.display()));
+        crate::log::error(&format!(
+            "{} was not protected ({}); recreating it",
+            root.display(),
+            crate::scheduler::describe_security(&root)
+        ));
         std::fs::remove_dir_all(&root).map_err(|e| format!("{} {}: {e}", grandhonor_core::locale::t("Не удалось удалить", "Could not remove", "无法删除"), root.display()))?;
     }
     if !root.exists() {

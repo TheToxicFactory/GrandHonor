@@ -103,7 +103,7 @@ impl MenuBuilder {
             language: Some(grandhonor_core::locale::language().code().to_string()),
             notice: None,
             notice_is_error: false,
-            job_running: crate::updater::checking() || crate::updater::installing() || crate::drivers::diagnostics::installing(),
+            job_running: crate::updater::checking() || crate::updater::installing() || crate::drivers::diagnostics::busy(),
         };
         let mut state = state;
         if let Some((text, error)) = PANEL_NOTICE.lock().ok().and_then(|mut s| s.take()) {
@@ -644,7 +644,7 @@ fn build_app_profiles_section(menu: &mut SubMenu<'_>) {
         Some(t(
             "Пока программа открыта: режим «Производительность» и наибольшая частота экрана. После закрытия всё вернётся",
             "While a program is open: Performance mode and the highest refresh rate. Closing it puts both back",
-            "程序运行时使用高性能模式与最高刷新率，关闭后恢复",
+            "程序运行时使用「性能」模式与最高刷新率，关闭后恢复",
         )),
     );
     for app in apps.clone() {
@@ -1039,7 +1039,7 @@ fn build_performance_section(menu: &mut SubMenu<'_>, on_mode_changed: Arc<dyn Fn
 
     let active = settings::performance_mode_active();
     menu.add_command_ex(
-        t("Производительный режим", "Performance mode", "高性能模式"),
+        t("Производительный HONOR", "HONOR Performance", "HONOR 高性能"),
         Some(Box::new(move || {
             if settings::hunter_mode_active() {
                 return;
@@ -1053,9 +1053,9 @@ fn build_performance_section(menu: &mut SubMenu<'_>, on_mode_changed: Arc<dyn Fn
                 Ok(()) => {
                     on_mode_changed();
                     let text = if target {
-                        t("Производительный режим HONOR", "HONOR Performance on", "HONOR 高性能已开启")
+                        t("Производительный HONOR", "HONOR Performance", "HONOR 高性能")
                     } else {
-                        t("Обычный режим HONOR", "HONOR normal mode", "HONOR 标准模式")
+                        t("Обычный HONOR", "HONOR Standard", "HONOR 标准")
                     };
                     crate::osd::show(if target { Icon::Performance } else { Icon::Balanced }, text, None);
                 }

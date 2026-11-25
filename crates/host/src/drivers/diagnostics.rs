@@ -119,7 +119,7 @@ impl DriverPanel {
         let this = self.clone();
         page.add_command_ex(
             t("Проверить драйверы", "Check for driver updates", "检查驱动更新"),
-            Some(Box::new(move || this.scan())),
+            Some(Box::new(move || this.in_background(|p| p.scan()))),
             Some(t(
                 "Сверить драйверы и BIOS с сервером HONOR",
                 "Compare drivers and BIOS with HONOR's server",
@@ -190,7 +190,7 @@ impl DriverPanel {
         let this_exp = self.clone();
         tools.add_command_ex(
             t("Экспорт", "Export", "导出驱动"),
-            Some(Box::new(move || this_exp.export())),
+            Some(Box::new(move || this_exp.in_background(|p| p.export()))),
             Some(t("Сохранить все драйверы в архив", "Save all drivers to an archive", "将所有驱动保存为压缩包")),
             None,
             Some("card"),
@@ -200,7 +200,7 @@ impl DriverPanel {
         let this_imp = self.clone();
         tools.add_command_ex(
             t("Импорт", "Import", "导入驱动"),
-            Some(Box::new(move || this_imp.import())),
+            Some(Box::new(move || this_imp.in_background(|p| p.import()))),
             Some(t("Вернуть драйверы из архива", "Restore drivers from an archive", "从压缩包还原驱动")),
             None,
             Some("card"),
@@ -340,7 +340,10 @@ impl DriverPanel {
             let this_save = self.clone();
             item.add_command_ex(
                 t("Сохранить проверенный пакет", "Save verified package", "保存已验证的软件包"),
-                Some(Box::new(move || this_save.save_package(&u_save))),
+                Some(Box::new(move || {
+                    let u = u_save.clone();
+                    this_save.in_background(move |p| p.save_package(&u))
+                })),
                 Some(t(
                     "Скачать, проверить и сохранить в выбранную папку",
                     "Download, check and save to a folder you choose",
@@ -437,6 +440,22 @@ impl DriverPanel {
     /// Downloading and installing takes minutes: it runs on its own thread so the panel stays
     /// responsive; the result appears as the Drivers page message. The user already confirmed
     /// with a second click.
+    /// A check of the catalogue, a package download, an export or an import takes seconds to
+    /// minutes: it runs on its own thread and the panel keeps asking until it is done.
+    fn in_background(&self, work: impl FnOnce(&DriverPanel) + Send + 'static) {
+        if BUSY.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let this = self.clone();
+        let spawned = std::thread::Builder::new().name("drivers-work".into()).spawn(move || {
+            work(&this);
+            BUSY.store(false, Ordering::Release);
+        });
+        if spawned.is_err() {
+            BUSY.store(false, Ordering::Release);
+        }
+    }
+
     fn install_in_background(&self, update: DriverUpdate, bios: bool) {
         if INSTALLING.swap(true, Ordering::AcqRel) {
             return;
@@ -579,6 +598,12 @@ fn power_refusal() -> &'static str {
 }
 
 static INSTALLING: AtomicBool = AtomicBool::new(false);
+static BUSY: AtomicBool = AtomicBool::new(false);
+
+/// True while driver work runs in the background (install, check, download, export, import).
+pub fn busy() -> bool {
+    BUSY.load(Ordering::Acquire) || INSTALLING.load(Ordering::Acquire)
+}
 
 /// True while a driver or BIOS package downloads and installs (the panel keeps asking).
 pub fn installing() -> bool {

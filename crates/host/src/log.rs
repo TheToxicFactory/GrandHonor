@@ -10,9 +10,7 @@ static LOG_PATH: OnceLock<PathBuf> = OnceLock::new();
 
 pub fn log_path() -> &'static PathBuf {
     LOG_PATH.get_or_init(|| {
-        let base = std::env::var_os("LOCALAPPDATA")
-            .map(PathBuf::from)
-            .unwrap_or_else(std::env::temp_dir);
+        let base = crate::known_dirs::local_app_data();
         base.join("GrandHonor").join("GrandHonor.log")
     })
 }

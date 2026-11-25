@@ -77,18 +77,19 @@ pub fn set_windows_power_mode(mode: GUID) -> Result<(), String> {
     }
 }
 
-/// A short notice for the OSD when HONOR Performance could not be turned on.
+/// A short notice for the OSD when Fn+P set Windows Performance but HONOR Performance could
+/// not be turned on: the Windows mode did change, so it is named first.
 pub fn performance_refusal_short() -> &'static str {
     let mut status = SYSTEM_POWER_STATUS::default();
     let read = unsafe { GetSystemPowerStatus(&mut status) }.is_ok();
     if crate::settings::hunter_mode_active() {
-        t("Производительный HONOR · идёт HUNTER", "HONOR Performance · HUNTER is on", "HONOR 高性能 · HUNTER 已开启")
+        t("Производительность · HONOR: идёт HUNTER", "Performance · HONOR: HUNTER is on", "性能 · HONOR：HUNTER 已开启")
     } else if read && status.ACLineStatus != 1 {
-        t("Производительный HONOR · без зарядки", "HONOR Performance · on battery", "HONOR 高性能 · 电池供电")
+        t("Производительность · HONOR: без зарядки", "Performance · HONOR: on battery", "性能 · HONOR：电池供电")
     } else if read && status.BatteryLifePercent < 20 {
-        t("Производительный HONOR · заряд ниже 20%", "HONOR Performance · charge below 20%", "HONOR 高性能 · 电量低于 20%")
+        t("Производительность · HONOR: заряд ниже 20%", "Performance · HONOR: charge below 20%", "性能 · HONOR：电量低于 20%")
     } else {
-        t("Производительный HONOR недоступен", "HONOR Performance unavailable", "HONOR 高性能不可用")
+        t("Производительность · HONOR недоступен", "Performance · HONOR unavailable", "性能 · HONOR 不可用")
     }
 }
 
@@ -104,17 +105,17 @@ pub fn can_enable_performance_mode() -> Result<(), String> {
     }
     if status.ACLineStatus != 1 {
         return Err(t(
-            "Производительный режим доступен только при подключённом источнике питания.",
-            "Performance mode is available only when AC power is connected.",
-            "仅在连接电源适配器时可使用高性能模式。",
+            "«Производительный HONOR» доступен только от сети.",
+            "HONOR Performance needs the charger.",
+            "HONOR 高性能仅在接通电源时可用。",
         )
         .to_string());
     }
     if status.BatteryLifePercent <= 100 && status.BatteryLifePercent < 20 {
         return Err(t(
-            "Для производительного режима заряд батареи должен быть не менее 20%.",
-            "Performance mode requires at least 20% battery charge.",
-            "高性能模式要求电池电量不低于 20%。",
+            "Для «Производительного HONOR» заряд должен быть не ниже 20%.",
+            "HONOR Performance needs at least 20% charge.",
+            "HONOR 高性能要求电量不低于 20%。",
         )
         .to_string());
     }

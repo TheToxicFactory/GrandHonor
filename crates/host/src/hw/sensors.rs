@@ -278,7 +278,7 @@ pub fn build_telemetry(include_power_watts: bool) -> (String, TelemetrySummary) 
     } else if state.performance_mode_active {
         t("Производительный HONOR", "HONOR Performance", "HONOR 高性能").to_string()
     } else {
-        t("Умный", "Smart", "智能").to_string()
+        t("Обычный HONOR", "HONOR Standard", "HONOR 标准").to_string()
     };
 
     let backlight_level = hw

@@ -6,7 +6,8 @@ use std::path::PathBuf;
 use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::System::SystemInformation::{GetSystemDirectoryW, GetSystemWindowsDirectoryW};
 use windows::Win32::UI::Shell::{
-    FOLDERID_ProgramData, FOLDERID_ProgramFiles, KF_FLAG_DEFAULT, SHGetKnownFolderPath,
+    FOLDERID_LocalAppData, FOLDERID_ProgramData, FOLDERID_ProgramFiles, FOLDERID_RoamingAppData, KF_FLAG_DEFAULT,
+    SHGetKnownFolderPath,
 };
 use windows_core::GUID;
 
@@ -50,4 +51,14 @@ pub fn program_files() -> PathBuf {
 /// `C:\ProgramData`.
 pub fn program_data() -> PathBuf {
     known(&FOLDERID_ProgramData, r"C:\ProgramData")
+}
+
+/// The user's `%APPDATA%` (roaming), from the profile, not the environment.
+pub fn roaming_app_data() -> PathBuf {
+    known(&FOLDERID_RoamingAppData, r"C:\Users\Public\GrandHonor-no-profile")
+}
+
+/// The user's `%LOCALAPPDATA%`, from the profile, not the environment.
+pub fn local_app_data() -> PathBuf {
+    known(&FOLDERID_LocalAppData, r"C:\Users\Public\GrandHonor-no-profile")
 }

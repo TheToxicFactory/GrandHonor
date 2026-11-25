@@ -455,10 +455,31 @@ fn cleanup_legacy_run_entries() {
             let _ = RegCloseKey(key);
         }
     }
-    if let Some(appdata) = std::env::var_os("APPDATA") {
-        let lnk = PathBuf::from(appdata)
+    {
+        let lnk = crate::known_dirs::roaming_app_data()
             .join(r"Microsoft\Windows\Start Menu\Programs\Startup")
             .join("GrandHonor.lnk");
         let _ = std::fs::remove_file(lnk);
     }
+}
+
+/// The folder's owner and access list as SDDL, for the log when a protection check fails.
+pub fn describe_security(path: &Path) -> String {
+    use windows::Win32::Security::Authorization::ConvertSecurityDescriptorToStringSecurityDescriptorW;
+    let wide = HSTRING::from(path.as_os_str());
+    let mut sd = PSECURITY_DESCRIPTOR::default();
+    let info = OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION;
+    let err = unsafe { GetNamedSecurityInfoW(&wide, SE_FILE_OBJECT, info, None, None, None, None, &mut sd) };
+    if err.0 != 0 || sd.is_invalid() {
+        return format!("security not readable ({})", err.0);
+    }
+    let _guard = LocalFreeGuard(sd.0);
+    let mut text = PWSTR::null();
+    let ok = unsafe { ConvertSecurityDescriptorToStringSecurityDescriptorW(sd, SDDL_REVISION_1, info, &mut text, None) }.is_ok();
+    if !ok || text.is_null() {
+        return "security not convertible".into();
+    }
+    let out = unsafe { text.to_string() }.unwrap_or_default();
+    let _ = unsafe { LocalFree(Some(HLOCAL(text.0 as *mut _))) };
+    out
 }

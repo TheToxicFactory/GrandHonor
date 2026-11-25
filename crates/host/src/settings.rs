@@ -607,9 +607,7 @@ pub mod store {
     static CACHE: Mutex<Option<Cache>> = Mutex::new(None);
 
     pub fn path() -> PathBuf {
-        std::env::var_os("APPDATA")
-            .map(PathBuf::from)
-            .unwrap_or_else(std::env::temp_dir)
+        crate::known_dirs::roaming_app_data()
             .join("GrandHonor")
             .join("settings.json")
     }
