@@ -1,4 +1,8 @@
-# GrandHonor 2.5.4
+# GrandHonor 2.5.5
 
-- **Processor profiles:** Power → Processor profile lets you choose **Quiet**, **Balanced** or **Performance** separately for the charger and for battery. Quiet turns turbo off for a cooler, quieter laptop and longer battery life; Performance responds faster with higher clocks, like HONOR's Performance mode but without keeping the processor at full speed when idle. **Windows** leaves your power plan untouched, and its own values come back when you choose it again or uninstall GrandHonor.
-- **One look:** the Glass style was removed; the panel and on-screen notices always use the Graphite look, following your light or dark Windows theme.
+- **Safer for an administrator program:** GrandHonor now takes Windows' system folders from Windows itself, so no other program can redirect it; driver backup and restore use a folder only administrators can change; disks are opened read-only for health checks.
+- **Processor profiles:** the profile is now called **Fast** in English; each power plan keeps its own original values, so switching plans never loses them; if Windows refuses a change, the panel keeps showing the profile that is really in effect.
+- **No windows over your game:** driver and BIOS installs are confirmed with a second click in the panel and run in the background; a failed update shows a banner and an on-screen notice instead of a message box. Updates download in the background, so the panel stays responsive.
+- **Clearer names:** the Windows mode is "Performance" everywhere, the firmware mode is "HONOR Performance", and its notice says why it stayed off (no charger, charge below 20 %, HUNTER on).
+- **Fewer wake-ups and less memory:** app profiles react only to the programs you chose; the touchpad reconnects only for the touchpad itself; memory is given back after sleep; retries for HONOR events and the tray icon slow down instead of running forever.
+- **Fixes:** the charger notice shows once; the refresh-rate key works right after a screenshot; the tray menu closes when you click elsewhere; several notices at once are all shown; settings exports no longer carry the laptop's current state; setup closes only the installed copy; colour profiles appear only on the model they are measured for; texts and errors are translated in all three languages.
