@@ -243,13 +243,11 @@ pub fn check_drivers() -> Result<DriverCheckResult, String> {
     ));
     crate::log::info(&format!("Installed component versions: {dashboard}"));
 
-    let (api_updates, api_versions) = check_platform(&payload, &server_components);
+    let (api_updates, _api_versions) = check_platform(&payload, &server_components);
     let available_api_updates = filter_available_downloads(api_updates);
-    let platform_missing = available_api_updates.is_empty() && api_versions.is_empty();
 
     // The support catalog is always read too: it is the only source of BIOS and of packages
     // the update API does not list, so an API result must not hide them.
-    let _ = platform_missing;
     let (site_components, site_updates, _site_versions, site_complete) =
         check_support_site(&machine, &server_components);
     let available_site_updates = filter_available_downloads(site_updates);

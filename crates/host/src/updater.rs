@@ -171,15 +171,15 @@ pub fn rollback_dir() -> PathBuf {
 /// "previous version" that a rollback would copy into Program Files and start elevated.
 /// A folder that is not protected is removed and created again with a protected ACL.
 fn ensure_protected_root() -> Result<(), String> {
-    let root = rollback_dir().parent().map(Path::to_path_buf).ok_or("No ProgramData folder")?;
+    let root = rollback_dir().parent().map(Path::to_path_buf).ok_or(grandhonor_core::locale::t("Нет папки ProgramData", "No ProgramData folder", "没有 ProgramData 文件夹"))?;
     if root.exists() && !is_path_protected(&root) {
         crate::log::error(&format!("{} was not protected; recreating it", root.display()));
-        std::fs::remove_dir_all(&root).map_err(|e| format!("Could not remove {}: {e}", root.display()))?;
+        std::fs::remove_dir_all(&root).map_err(|e| format!("{} {}: {e}", grandhonor_core::locale::t("Не удалось удалить", "Could not remove", "无法删除"), root.display()))?;
     }
     if !root.exists() {
         create_protected_directory(&root, true)?;
     }
-    if is_path_protected(&root) { Ok(()) } else { Err(format!("{} is not protected", root.display())) }
+    if is_path_protected(&root) { Ok(()) } else { Err(format!("{}: {}", grandhonor_core::locale::t("Папка не защищена", "Folder is not protected", "文件夹未受保护"), root.display())) }
 }
 
 /// The backup can be trusted: it and its parent are protected folders.
@@ -215,11 +215,11 @@ fn backup_current() -> Result<(), String> {
     let dir = rollback_dir();
     ensure_protected_root()?;
     if dir.exists() {
-        std::fs::remove_dir_all(&dir).map_err(|e| format!("Could not clear the old backup: {e}"))?;
+        std::fs::remove_dir_all(&dir).map_err(|e| format!("{}: {e}", grandhonor_core::locale::t("Не удалось очистить старую копию", "Could not clear the old backup", "无法清除旧备份")))?;
     }
     create_protected_directory(&dir, true)?;
     for file in ["GrandHonor.exe", "GrandHonor.Panel.exe"] {
-        std::fs::copy(app.join(file), dir.join(file)).map_err(|e| format!("Backup of {file} failed: {e}"))?;
+        std::fs::copy(app.join(file), dir.join(file)).map_err(|e| format!("{} {file}: {e}", grandhonor_core::locale::t("Не удалось сохранить копию", "Backup failed:", "备份失败：")))?;
     }
     std::fs::write(dir.join("version.txt"), env!("CARGO_PKG_VERSION")).map_err(|e| e.to_string())
 }
@@ -341,7 +341,7 @@ fn restore_backup() -> Result<(), String> {
     let app = install_root();
     let dir = rollback_dir();
     if !backup_trusted() {
-        return Err("The stored previous version is not in a protected folder; not restoring it".into());
+        return Err(grandhonor_core::locale::t("Сохранённая прошлая версия лежит в незащищённой папке, восстанавливать её нельзя", "The stored previous version is not in a protected folder; not restoring it", "保存的旧版本不在受保护的文件夹中，无法恢复").into());
     }
     for file in ["GrandHonor.exe", "GrandHonor.Panel.exe"] {
         let mut last = String::new();

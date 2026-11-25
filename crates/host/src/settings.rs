@@ -696,7 +696,9 @@ pub mod store {
             Err(_) => {}
         }
         let values: BTreeMap<_, _> = super::registry_values().into_iter().collect();
-        let _lock = process_lock();
+        // No process lock here: this runs under CACHE, while `set` takes the lock and then
+        // CACHE, so locking here could make both wait (3 s). The write is atomic and only
+        // creates the file from the registry copy, so a race with another writer is harmless.
         if !file.exists() {
             let _ = write_file(&values);
         }

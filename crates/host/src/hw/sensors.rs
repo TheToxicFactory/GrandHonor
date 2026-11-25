@@ -290,7 +290,7 @@ pub fn build_telemetry(include_power_watts: bool) -> (String, TelemetrySummary) 
         Some(BacklightLevel::Off) => t("выкл.", "off", "关").to_string(),
         Some(BacklightLevel::Low) => t("слабая", "weak", "弱").to_string(),
         Some(BacklightLevel::High) => t("сильная", "strong", "强").to_string(),
-        None => "?".to_string(),
+        None => "—".to_string(),
     };
 
     let charge_label = match hw.as_ref().and_then(|s| Some((s.charge_start?, s.charge_end?))) {
@@ -300,7 +300,7 @@ pub fn build_telemetry(include_power_watts: bool) -> (String, TelemetrySummary) 
             Some(BatteryMode::Office) => "70–90%".to_string(),
             Some(BatteryMode::Travel) => "95–100%".to_string(),
             Some(BatteryMode::Disabled) => t("выкл.", "off", "关").to_string(),
-            None => "?".to_string(),
+            None => "—".to_string(),
         },
     };
 
@@ -328,10 +328,10 @@ pub fn build_telemetry(include_power_watts: bool) -> (String, TelemetrySummary) 
         lines.push(format!("{}{}", t("Батарея: ", "Battery: ", "电池功率："), pw));
     }
     if cpu_temp.is_some() || battery_temp.is_some() {
-        let cpu = cpu_temp.map(|v| format!("{v}°C")).unwrap_or_else(|| "?".into());
+        let cpu = cpu_temp.map(|v| format!("{v}°C")).unwrap_or_else(|| "—".into());
         let bat = battery_temp
             .map(|v| format!("{v}°C"))
-            .unwrap_or_else(|| "?".into());
+            .unwrap_or_else(|| "—".into());
         lines.push(format!(
             "CPU: {cpu}{}{bat}",
             t("; батарея: ", "; battery: ", "；电池：")
@@ -394,7 +394,7 @@ fn system_power_status() -> (Option<u8>, Option<bool>) {
 }
 
 fn format_fan(rpm: Option<i32>, target: Option<i32>) -> String {
-    let base = rpm.map(|v| v.to_string()).unwrap_or_else(|| "?".into());
+    let base = rpm.map(|v| v.to_string()).unwrap_or_else(|| "—".into());
     match target {
         Some(tgt) => format!("{base}→{tgt}"),
         None => base,

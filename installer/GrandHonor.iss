@@ -505,6 +505,7 @@ begin
         DeleteFile(DataDir + '\GrandHonor.log');
         DeleteFile(DataDir + '\GrandHonor.log.1');
         DeleteFile(DataDir + '\settings-backup.json');
+        DeleteFile(DataDir + '\settings-before-import.json');
         RemoveDir(DataDir);
       end;
       DataDir := ExpandConstant('{userappdata}\GrandHonor');

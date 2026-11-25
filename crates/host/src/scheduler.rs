@@ -1,8 +1,7 @@
 use crate::hw::com::{ComGuard, OwnedVariant};
-use crate::settings;
 use std::ffi::c_void;
 use std::path::{Path, PathBuf};
-use windows::Win32::Foundation::{GetLastError, HLOCAL, LocalFree};
+use windows::Win32::Foundation::{HLOCAL, LocalFree};
 use windows::Win32::Security::Authorization::{
     ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
     GetNamedSecurityInfoW, SDDL_REVISION_1, SE_FILE_OBJECT,
@@ -340,7 +339,6 @@ pub fn ensure_registered() -> Result<(), String> {
             )
             .map_err(|e| e.to_string())?;
     }
-    let _ = settings::read_hklm_string;
     Ok(())
 }
 
@@ -463,5 +461,4 @@ fn cleanup_legacy_run_entries() {
             .join("GrandHonor.lnk");
         let _ = std::fs::remove_file(lnk);
     }
-    let _ = unsafe { GetLastError() };
 }

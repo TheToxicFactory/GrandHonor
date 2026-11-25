@@ -44,7 +44,8 @@ impl Drop for Handle {
 fn open(index: u32) -> Option<Handle> {
     let path = HSTRING::from(format!(r"\\.\PhysicalDrive{index}"));
     unsafe {
-        CreateFileW(&path, 0x8000_0000 | 0x4000_0000, FILE_SHARE_READ | FILE_SHARE_WRITE, None, OPEN_EXISTING, FILE_FLAGS_AND_ATTRIBUTES(0), None)
+        // Read only: health queries never need write access to the disk.
+        CreateFileW(&path, 0x8000_0000, FILE_SHARE_READ | FILE_SHARE_WRITE, None, OPEN_EXISTING, FILE_FLAGS_AND_ATTRIBUTES(0), None)
             .or_else(|_| CreateFileW(&path, 0, FILE_SHARE_READ | FILE_SHARE_WRITE, None, OPEN_EXISTING, FILE_FLAGS_AND_ATTRIBUTES(0), None))
             .ok()
             .map(Handle)

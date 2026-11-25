@@ -52,7 +52,7 @@ The title shows **battery health** (capacity against the original), charge cycle
 <img src="images/display.png" width="380" align="right" alt="Display tab">
 
 - **Refresh rate** — 60 or 120 Hz. The refresh-rate key switches it too.
-- **Colour profile** — **Vivid** uses the panel's full colour range; **sRGB** gives accurate colours for the web, photos and office work; **P3** is the wide gamut of Apple displays.
+- **Colour profile** — **Vivid** uses the panel's full colour range; **sRGB** gives accurate colours for the web, photos and office work; **P3** is the wide gamut of Apple displays. The profiles are measured for the built-in screen of the MagicBook ZQC-P and appear only on that model.
 - **Eye comfort**
   - **Warm** — less blue light; drag the **warmth slider** from subtle to warmer.
   - **E-book** — a warm monochrome for reading that follows the time of day.

@@ -102,7 +102,15 @@ fn rgb_to_xyz(g: Gamut) -> Option<[[f64; 3]; 3]> {
 }
 
 /// The panel-space matrix for a profile; None for the panel's own (native) colours.
+/// The colour profiles are computed for the ZQC-P panel (code name ZhuqueC) only.
+pub fn profile_supported() -> bool {
+    crate::hw::firmware::identity().code_name().as_deref() == Some("ZhuqueC")
+}
+
 pub fn profile_matrix(profile: ColorProfile) -> Option<[f32; 9]> {
+    if !profile_supported() {
+        return None;
+    }
     let target = match profile {
         ColorProfile::Native => return None,
         ColorProfile::Srgb => SRGB,

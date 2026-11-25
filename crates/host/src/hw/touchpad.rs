@@ -2,8 +2,6 @@ use super::wmi::{change_wmi_brightness, try_step_acpi_brightness};
 use crate::settings;
 use grandhonor_core::locale::t;
 use grandhonor_core::protocol::{TouchpadEdgeGesture, TouchpadHaptics};
-use std::ffi::c_void;
-use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
@@ -453,9 +451,7 @@ impl TouchpadBrightnessService {
         let owned_stop = match Arc::try_unwrap(stop_handle) {
             Ok(h) => h,
             Err(shared) => {
-                // Keep another handle duplicate? Simpler: create ReaderGroup storing Arc or duplicate:
-                // wait - we can't unwrap while threads hold clones, so let's duplicate or store HANDLE!
-                // Actually let's store Arc<OwnedHandle> in ReaderGroup — cleanest!
+                // Reader threads still hold the event: the group keeps its own duplicate.
                 return Ok(Some(ReaderGroup {
                     stop_event: OwnedHandle(unsafe {
                         let mut dup = HANDLE::default();
@@ -576,9 +572,8 @@ fn read_device_loop(
             process_gesture(&action_lock, buffer[1], buffer[2]);
         }
     }
-    let _ = ptr::addr_of!(stopped);
-    let _ = size_of::<c_void>();
 }
+
 
 fn process_gesture(
     action_lock: &Mutex<Option<(u8, u8, Instant)>>,

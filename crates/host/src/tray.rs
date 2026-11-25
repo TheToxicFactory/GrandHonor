@@ -664,7 +664,8 @@ fn cycle_profile(rt: &Arc<AppRuntime>) {
             Profile::Economy => (Icon::Normal, t("Экономия", "Efficiency", "能效")),
             Profile::Balanced => (Icon::Balanced, t("Баланс", "Balanced", "平衡")),
             Profile::Performance if honor_on => (Icon::Performance, t("Производительный HONOR", "HONOR Performance", "HONOR 高性能")),
-            Profile::Performance => (Icon::Performance, t("Производительный HONOR · без зарядки", "HONOR Performance · on battery", "HONOR 高性能 · 电池供电")),
+            // Say why HONOR Performance stayed off: no charger, low charge or HUNTER.
+            Profile::Performance => (Icon::Performance, crate::hw::power::performance_refusal_short()),
         };
         notice(&rt, icon, text, None);
     });

@@ -22,6 +22,8 @@ jobs:
           rustup default stable-x86_64-pc-windows-msvc
       - name: Build
         run: ./build.ps1
+      - name: Test
+        run: cargo test -p grandhonor-core -p grandhonor-panel --locked
       - name: Install Inno Setup
         run: |
           $setup = Join-Path $env:RUNNER_TEMP 'innosetup-7.1.1-x64.exe'

@@ -77,6 +77,21 @@ pub fn set_windows_power_mode(mode: GUID) -> Result<(), String> {
     }
 }
 
+/// A short notice for the OSD when HONOR Performance could not be turned on.
+pub fn performance_refusal_short() -> &'static str {
+    let mut status = SYSTEM_POWER_STATUS::default();
+    let read = unsafe { GetSystemPowerStatus(&mut status) }.is_ok();
+    if crate::settings::hunter_mode_active() {
+        t("Производительный HONOR · идёт HUNTER", "HONOR Performance · HUNTER is on", "HONOR 高性能 · HUNTER 已开启")
+    } else if read && status.ACLineStatus != 1 {
+        t("Производительный HONOR · без зарядки", "HONOR Performance · on battery", "HONOR 高性能 · 电池供电")
+    } else if read && status.BatteryLifePercent < 20 {
+        t("Производительный HONOR · заряд ниже 20%", "HONOR Performance · charge below 20%", "HONOR 高性能 · 电量低于 20%")
+    } else {
+        t("Производительный HONOR недоступен", "HONOR Performance unavailable", "HONOR 高性能不可用")
+    }
+}
+
 pub fn can_enable_performance_mode() -> Result<(), String> {
     let mut status = SYSTEM_POWER_STATUS::default();
     if unsafe { GetSystemPowerStatus(&mut status) }.is_err() {

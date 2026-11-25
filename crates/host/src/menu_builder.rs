@@ -1259,39 +1259,43 @@ fn report_repair(name: &str, result: Result<bool, String>) {
 fn build_display_filter_section(menu: &mut SubMenu<'_>) {
     use settings::{ColorProfile, DisplayFilter};
     menu.add_separator();
-    let profile = settings::color_profile();
-    let profile_help = match profile {
-        ColorProfile::Native => t(
-            "Полный цветовой охват панели: ярко и насыщенно",
-            "The panel's full gamut: vivid and saturated",
-            "面板原生色域：鲜艳饱和",
-        ),
-        ColorProfile::Srgb => t(
-            "Точные цвета для интернета, фото и офиса",
-            "Accurate colours for the web, photos and office work",
-            "适合网页、照片与办公的准确色彩",
-        ),
-        ColorProfile::DisplayP3 => t(
-            "Широкий охват, как у экранов Apple (Display P3)",
-            "Wide gamut, as on Apple displays (Display P3)",
-            "与 Apple 显示屏一致的广色域（Display P3）",
-        ),
-    };
-    menu.add_item(t("Цветовой профиль", "Colour profile", "色彩配置"), None, false, false, Some(profile_help));
-    let mut profiles = menu.add_container("", "segment");
-    for (choice, label) in [
-        (ColorProfile::Native, t("Яркий", "Vivid", "鲜艳")),
-        (ColorProfile::Srgb, "sRGB"),
-        (ColorProfile::DisplayP3, "P3"),
-    ] {
-        profiles.add_command_ex(
-            label,
-            Some(Box::new(move || {
-                settings::set_color_profile(choice);
-                crate::hw::display_filter::apply_saved();
-            })),
-            None, None, Some("pill"), true, profile == choice,
-        );
+    // sRGB and P3 are computed from the measured primaries of the ZQC-P panel: on another
+    // model they would shift colours, so the choice is offered only there.
+    if crate::hw::display_filter::profile_supported() {
+        let profile = settings::color_profile();
+        let profile_help = match profile {
+            ColorProfile::Native => t(
+                "Полный цветовой охват панели: ярко и насыщенно",
+                "The panel's full gamut: vivid and saturated",
+                "面板原生色域：鲜艳饱和",
+            ),
+            ColorProfile::Srgb => t(
+                "Точные цвета встроенного экрана для интернета, фото и офиса",
+                "Accurate colours on the built-in screen for the web, photos and office work",
+                "内置屏幕上适合网页、照片与办公的准确色彩",
+            ),
+            ColorProfile::DisplayP3 => t(
+                "Широкий охват, как у экранов Apple (Display P3)",
+                "Wide gamut, as on Apple displays (Display P3)",
+                "与 Apple 显示屏一致的广色域（Display P3）",
+            ),
+        };
+        menu.add_item(t("Цветовой профиль", "Colour profile", "色彩配置"), None, false, false, Some(profile_help));
+        let mut profiles = menu.add_container("", "segment");
+        for (choice, label) in [
+            (ColorProfile::Native, t("Яркий", "Vivid", "鲜艳")),
+            (ColorProfile::Srgb, "sRGB"),
+            (ColorProfile::DisplayP3, "P3"),
+        ] {
+            profiles.add_command_ex(
+                label,
+                Some(Box::new(move || {
+                    settings::set_color_profile(choice);
+                    crate::hw::display_filter::apply_saved();
+                })),
+                None, None, Some("pill"), true, profile == choice,
+            );
+        }
     }
     menu.add_separator();
     let current = settings::display_filter();

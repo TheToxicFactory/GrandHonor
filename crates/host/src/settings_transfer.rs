@@ -35,11 +35,11 @@ fn to_json() -> Value {
 }
 
 fn parse(text: &str) -> Result<Vec<(String, StoredValue)>, String> {
-    let root: Value = serde_json::from_str(text).map_err(|e| format!("Not a settings file: {e}"))?;
+    let root: Value = serde_json::from_str(text).map_err(|e| format!("{}: {e}", grandhonor_core::locale::t("Это не файл настроек", "Not a settings file", "不是设置文件")))?;
     if root["format"].as_str() != Some(FORMAT) {
-        return Err("This file is not a GrandHonor settings export.".into());
+        return Err(grandhonor_core::locale::t("Это не экспорт настроек GrandHonor.", "This file is not a GrandHonor settings export.", "此文件不是 GrandHonor 设置导出。").into());
     }
-    let map = root["settings"].as_object().ok_or("The file has no settings.")?;
+    let map = root["settings"].as_object().ok_or(grandhonor_core::locale::t("В файле нет настроек.", "The file has no settings.", "文件中没有设置。"))?;
     let values = map
         .iter()
         .filter(|(name, _)| settings::is_user_setting(name))
@@ -50,7 +50,7 @@ fn parse(text: &str) -> Result<Vec<(String, StoredValue)>, String> {
         }.map(|v| (name.clone(), v)))
         .collect::<Vec<_>>();
     if values.is_empty() {
-        return Err("The file contains no settings.".into());
+        return Err(grandhonor_core::locale::t("В файле нет настроек.", "The file contains no settings.", "文件中没有设置。").into());
     }
     Ok(values)
 }
