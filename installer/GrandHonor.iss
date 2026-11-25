@@ -1,4 +1,4 @@
-#ifndef AppVersion
+﻿#ifndef AppVersion
   #error AppVersion must be supplied by build.ps1
 #endif
 #ifndef PayloadDir
@@ -225,8 +225,8 @@ begin
     GrandHonor 2.5.2 and earlier could hang after the window closed, keeping its files in
     use, so whatever is left of GrandHonor is ended. }
   if WasRunning then Sleep(1500);
-  Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM GrandHonor.exe', '', SW_HIDE, ewWaitUntilTerminated, Code);
-  Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM GrandHonor.Panel.exe', '', SW_HIDE, ewWaitUntilTerminated, Code);
+  // Only the copy installed here: a portable copy elsewhere keeps running.
+  Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'), '-NoProfile -NonInteractive -Command "Get-Process GrandHonor,GrandHonor.Panel -ErrorAction SilentlyContinue | Where-Object { $_.Path -like ''' + ExpandConstant('{app}') + '\*'' } | Stop-Process -Force"', '', SW_HIDE, ewWaitUntilTerminated, Code);
 end;
 
 function InitializeSetup: Boolean;

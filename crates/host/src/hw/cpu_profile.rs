@@ -79,27 +79,42 @@ pub fn chosen(ac: bool) -> Option<Profile> {
     settings::cpu_profile(source_key(ac)).and_then(Profile::from_code)
 }
 
-/// The active scheme, freed when dropped.
-struct ActiveScheme(*mut GUID);
+/// A power scheme by GUID: the active one, or a saved one.
+struct ActiveScheme(GUID);
+
+/// Parses the `{:?}` form of a GUID ("381B4222-F694-41F0-9685-FF5BB260DF2E").
+fn parse_guid(text: &str) -> Option<GUID> {
+    let hex: String = text.chars().filter(|c| *c != '-').collect();
+    (hex.len() == 32).then(|| u128::from_str_radix(&hex, 16).ok()).flatten().map(GUID::from_u128)
+}
 
 impl ActiveScheme {
     fn get() -> Option<Self> {
         let mut scheme: *mut GUID = std::ptr::null_mut();
         let ok = unsafe { PowerGetActiveScheme(None, &mut scheme) }.is_ok() && !scheme.is_null();
-        ok.then_some(Self(scheme))
+        if !ok {
+            return None;
+        }
+        let guid = unsafe { *scheme };
+        let _ = unsafe { LocalFree(Some(HLOCAL(scheme as *mut _))) };
+        Some(Self(guid))
+    }
+
+    fn open(text: &str) -> Option<Self> {
+        parse_guid(text).map(Self)
     }
 
     fn guid(&self) -> GUID {
-        unsafe { *self.0 }
+        self.0
     }
 
     fn read(&self, setting: &GUID, ac: bool) -> Option<u32> {
         let mut value = 0u32;
         let status = unsafe {
             if ac {
-                PowerReadACValueIndex(None, Some(self.0), Some(&SUB_PROCESSOR), Some(setting), &mut value).0
+                PowerReadACValueIndex(None, Some(&self.0), Some(&SUB_PROCESSOR), Some(setting), &mut value).0
             } else {
-                PowerReadDCValueIndex(None, Some(self.0), Some(&SUB_PROCESSOR), Some(setting), &mut value)
+                PowerReadDCValueIndex(None, Some(&self.0), Some(&SUB_PROCESSOR), Some(setting), &mut value)
             }
         };
         (status == 0).then_some(value)
@@ -108,22 +123,17 @@ impl ActiveScheme {
     fn write(&self, setting: &GUID, ac: bool, value: u32) -> bool {
         unsafe {
             if ac {
-                PowerWriteACValueIndex(None, self.0, Some(&SUB_PROCESSOR), Some(setting), value).is_ok()
+                PowerWriteACValueIndex(None, &self.0, Some(&SUB_PROCESSOR), Some(setting), value).is_ok()
             } else {
-                PowerWriteDCValueIndex(None, self.0, Some(&SUB_PROCESSOR), Some(setting), value) == 0
+                PowerWriteDCValueIndex(None, &self.0, Some(&SUB_PROCESSOR), Some(setting), value) == 0
             }
         }
     }
 
-    /// Re-activating the scheme makes Windows pick up the written values at once.
+    /// Re-activating the active scheme makes Windows pick up the written values at once.
+    /// Only ever called on the active scheme (it would switch to any other).
     fn commit(&self) {
-        let _ = unsafe { PowerSetActiveScheme(None, Some(self.0)) };
-    }
-}
-
-impl Drop for ActiveScheme {
-    fn drop(&mut self) {
-        let _ = unsafe { LocalFree(Some(HLOCAL(self.0 as *mut _))) };
+        let _ = unsafe { PowerSetActiveScheme(None, Some(&self.0)) };
     }
 }
 
@@ -156,31 +166,58 @@ fn restore_into(scheme: &ActiveScheme, values: &[(Option<u32>, Option<u32>)]) {
             scheme.write(&row.setting, false, *v);
         }
     }
-    scheme.commit();
 }
 
 /// Writes the chosen profiles into the active scheme, or puts the scheme's own values back
 /// when neither source has one. Called after a choice in the panel and once at start (Windows
 /// updates can reset schemes). Returns false when Windows refused a write.
-pub fn apply() -> bool {
-    let Some(scheme) = ActiveScheme::get() else { return false };
-    let saved = settings::cpu_profile_original().and_then(|t| decode(&t));
-    let (ac_profile, dc_profile) = (chosen(true), chosen(false));
-    if ac_profile.is_none() && dc_profile.is_none() {
-        if let Some((guid, values)) = &saved
-            && *guid == format!("{:?}", scheme.guid())
-        {
+/// Every scheme the profiles have written into keeps its own entry, so switching schemes
+/// never loses the values of the one written before. Entries are joined with '/'.
+type Saved = Vec<(String, Vec<(Option<u32>, Option<u32>)>)>;
+
+fn load_saved() -> Saved {
+    settings::cpu_profile_original().map_or_else(Vec::new, |t| t.split('/').filter_map(decode).collect())
+}
+
+fn store_saved(saved: &Saved) {
+    if saved.is_empty() {
+        settings::set_cpu_profile_original(None);
+        return;
+    }
+    let text: Vec<String> = saved
+        .iter()
+        .filter_map(|(guid, values)| parse_guid(guid).map(|g| encode(&g, values)))
+        .collect();
+    settings::set_cpu_profile_original(Some(&text.join("/")));
+}
+
+/// Puts back every saved scheme's own values (each written by its GUID, active or not).
+fn restore_all(saved: &Saved) {
+    for (guid, values) in saved {
+        if let Some(scheme) = ActiveScheme::open(guid) {
             restore_into(&scheme, values);
         }
-        settings::set_cpu_profile_original(None);
+    }
+}
+
+pub fn apply() -> bool {
+    let Some(scheme) = ActiveScheme::get() else { return false };
+    let mut saved = load_saved();
+    let (ac_profile, dc_profile) = (chosen(true), chosen(false));
+    if ac_profile.is_none() && dc_profile.is_none() {
+        restore_all(&saved);
+        // The active scheme last, so Windows re-reads it.
+        scheme.commit();
+        store_saved(&Vec::new());
         return true;
     }
-    // The user switched schemes since the values were saved: save this scheme's own values.
-    let originals = match saved {
-        Some((guid, values)) if guid == format!("{:?}", scheme.guid()) => values,
-        _ => {
+    let key = format!("{:?}", scheme.guid());
+    let originals = match saved.iter().find(|(g, _)| *g == key) {
+        Some((_, values)) => values.clone(),
+        None => {
             let values: Vec<_> = ROWS.iter().map(|r| (scheme.read(&r.setting, true), scheme.read(&r.setting, false))).collect();
-            settings::set_cpu_profile_original(Some(&encode(&scheme.guid(), &values)));
+            saved.push((key, values.clone()));
+            store_saved(&saved);
             values
         }
     };
@@ -220,6 +257,7 @@ mod tests {
         assert_eq!(guid, format!("{scheme:?}"));
         assert_eq!(back, values);
         assert!(decode("garbage").is_none());
+        assert_eq!(parse_guid(&format!("{scheme:?}")), Some(scheme));
     }
 
     #[test]

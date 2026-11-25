@@ -92,7 +92,7 @@ fn fetch_latest() -> Result<Option<Release>, String> {
         return Err(rate_limit_message(response.rate_limit_reset));
     }
     if response.status != 200 {
-        return Err(format!("GitHub answered {}", response.status));
+        return Err(format!("{} {}", grandhonor_core::locale::t("Ответ GitHub:", "GitHub answered", "GitHub 返回"), response.status));
     }
     parse_release(&response.body, env!("CARGO_PKG_VERSION"))
 }
@@ -108,7 +108,7 @@ fn rate_limit_message(reset: Option<u64>) -> String {
     let when = reset.and_then(|unix| {
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
         let minutes = unix.saturating_sub(now).div_ceil(60).max(1);
-        Some(format!(" {} {minutes} {}", t("через", "in", ""), t("мин", "min", "分钟后")))
+        Some(format!(" {} {minutes} {}", t("через", "in", "于"), t("мин", "min", "分钟后")))
     });
     format!(
         "{}{}",
@@ -117,7 +117,7 @@ fn rate_limit_message(reset: Option<u64>) -> String {
             "GitHub has paused checks from your address for a while (often a VPN). Try again",
             "GitHub 暂时限制了您的地址（常见于 VPN），请稍后重试",
         ),
-        when.unwrap_or_else(|| t(" позже", " later", "").to_string()),
+        when.unwrap_or_else(|| t(" позже", " later", "。").to_string()),
     )
 }
 
@@ -131,17 +131,17 @@ fn parse_release(body: &[u8], current: &str) -> Result<Option<Release>, String> 
     let asset = json["assets"]
         .as_array()
         .and_then(|assets| assets.iter().find(|a| a["name"].as_str() == Some(SETUP_ASSET)))
-        .ok_or("The release has no setup file")?;
+        .ok_or(grandhonor_core::locale::t("В выпуске нет установщика", "The release has no setup file", "发布中没有安装程序"))?;
     let url = asset["browser_download_url"].as_str().ok_or("No download URL")?.to_string();
     let size = asset["size"].as_u64().ok_or("No size")?;
     let sha256 = asset["digest"]
         .as_str()
         .and_then(|d| d.strip_prefix("sha256:"))
         .filter(|h| h.len() == 64 && h.chars().all(|c| c.is_ascii_hexdigit()))
-        .ok_or("GitHub published no SHA-256 for the setup; refusing to install it")?
+        .ok_or(grandhonor_core::locale::t("GitHub не опубликовал SHA-256 установщика, устанавливать нельзя", "GitHub published no SHA-256 for the setup; refusing to install it", "GitHub 未公布安装程序的 SHA-256，拒绝安装"))?
         .to_string();
     if size == 0 || size > MAX_SETUP_SIZE {
-        return Err("Unexpected setup size".into());
+        return Err(grandhonor_core::locale::t("Неожиданный размер установщика", "Unexpected setup size", "安装程序大小异常").into());
     }
     Ok(Some(Release { version, url, size, sha256 }))
 }
@@ -220,29 +220,59 @@ fn spawn_helper(dir: &Path, args: &[&str]) -> Result<(), String> {
     Ok(())
 }
 
+static INSTALLING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// True while an update downloads and is checked (the panel keeps asking meanwhile).
+pub fn installing() -> bool {
+    INSTALLING.load(std::sync::atomic::Ordering::Acquire)
+}
+
+/// Runs `start_update` on its own thread so the panel stays responsive during the download;
+/// `done` gets the result (on `Ok` it must quit the host).
+pub fn start_update_in_background(release: Release, done: impl FnOnce(Result<(), String>) + Send + 'static) {
+    use std::sync::atomic::Ordering;
+    if INSTALLING.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let spawned = std::thread::Builder::new().name("update-install".into()).spawn(move || {
+        let result = start_update(&release);
+        INSTALLING.store(false, Ordering::Release);
+        done(result);
+    });
+    if spawned.is_err() {
+        INSTALLING.store(false, Ordering::Release);
+    }
+}
+
 /// Downloads, verifies and hands over to the helper. On `Ok` the caller must quit the host.
 pub fn start_update(release: &Release) -> Result<(), String> {
+    use grandhonor_core::locale::t;
     if !is_installation_path() {
-        return Err("Updates install only into the regular Program Files installation.".into());
+        return Err(t(
+            "Обновление ставится только в обычную установку в Program Files.",
+            "Updates install only into the regular Program Files installation.",
+            "更新只能安装到 Program Files 中的常规安装。",
+        )
+        .into());
     }
     let url = url::Url::parse(&release.url).map_err(|e| e.to_string())?;
     if url.scheme() != "https"
         || !grandhonor_core::url_guard::is_trusted_update_host(url.host_str().unwrap_or(""))
         || !(url.host_str() == Some("github.com") && url.path().starts_with(RELEASE_DOWNLOAD_PATH))
     {
-        return Err("The download address is not GrandHonor's GitHub release.".into());
+        return Err(t("Адрес загрузки не ведёт на выпуск GrandHonor на GitHub.", "The download address is not GrandHonor's GitHub release.", "下载地址不是 GrandHonor 的 GitHub 发布。").into());
     }
     let dir = staging_dir("update")?;
     let setup = dir.join(SETUP_ASSET);
     let status = download_to_file_with(&url, &setup, release.size, 120_000, validate_update_redirect)?;
     if status != 200 {
-        return Err(format!("Download failed ({status})"));
+        return Err(format!("{} ({status})", t("Загрузка не удалась", "Download failed", "下载失败")));
     }
     let size = std::fs::metadata(&setup).map_err(|e| e.to_string())?.len();
     let hash = compute_sha256_hex(&setup)?;
     if size != release.size || !hash.eq_ignore_ascii_case(&release.sha256) {
         let _ = std::fs::remove_dir_all(&dir);
-        return Err("The downloaded setup does not match GitHub's checksum. Nothing was changed.".into());
+        return Err(t("Скачанный установщик не совпадает с контрольной суммой GitHub. Ничего не изменено.", "The downloaded setup does not match GitHub's checksum. Nothing was changed.", "下载的安装程序与 GitHub 校验和不符，未做任何更改。").into());
     }
     backup_current()?;
     crate::settings_transfer::refresh_backup();
@@ -252,7 +282,7 @@ pub fn start_update(release: &Release) -> Result<(), String> {
 /// Hands the rollback to the helper. On `Ok` the caller must quit the host.
 pub fn start_rollback() -> Result<(), String> {
     if rollback_version().is_none() {
-        return Err("No previous version is stored.".into());
+        return Err(grandhonor_core::locale::t("Прошлая версия не сохранена.", "No previous version is stored.", "没有保存的旧版本。").into());
     }
     let dir = staging_dir("rollback")?;
     spawn_helper(&dir, &["--apply-rollback"])

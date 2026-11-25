@@ -138,6 +138,8 @@ impl OemEventWatcher {
                 let mut last_mic_time = -HOTKEY_DEBOUNCE_MS;
                 let mut last_cam_time = -HOTKEY_DEBOUNCE_MS;
                 let mut last_snip_time = -HOTKEY_DEBOUNCE_MS;
+                // Its own debounce: a refresh-rate press right after a screenshot must count.
+                let mut last_rate_time = -HOTKEY_DEBOUNCE_MS;
                 let mut last_charger: Option<(ChargerNotice, i64)> = None;
                 let mut logged_codes = std::collections::HashSet::new();
                 let start = std::time::Instant::now();
@@ -193,7 +195,7 @@ impl OemEventWatcher {
                         0x2EA | 0x2EB => on_event(OemEvent::FnLock(code == 0x2EA)),
                         0x28C | 0x28D => on_event(OemEvent::WindowsKey(code == 0x28C)),
                         0x2A7 => {
-                            if accept(&mut last_snip_time, now) {
+                            if accept(&mut last_rate_time, now) {
                                 on_event(OemEvent::RefreshRateKey);
                             }
                         }
@@ -280,6 +282,9 @@ fn run_watcher_loop(
 ) {
     let mut observed_gen = 0u64;
     let mut logged_once = false;
+    // Without the HONOR driver the subscription keeps failing: wait longer each time, up to
+    // 10 minutes (a reconnect request after resume or a device change still wakes this).
+    let mut retry_secs = 5u64;
 
     while !stop.load(Ordering::Acquire) {
         let error_flag = Arc::new(AtomicBool::new(false));
@@ -312,6 +317,7 @@ fn run_watcher_loop(
         let retry = match subscription {
             Ok(services) => {
                 logged_once = false;
+                retry_secs = 5;
                 let (lock, cv) = &*wake_notify;
                 let Ok(mut guard) = lock.lock() else { break };
                 // No timer: a sink error, a reconnect request or shutdown wakes this.
@@ -341,10 +347,11 @@ fn run_watcher_loop(
         if retry {
             let (lock, cv) = &*wake_notify;
             let Ok(guard) = lock.lock() else { break };
-            let Ok((guard, _)) = cv.wait_timeout_while(guard, Duration::from_secs(5), |generation| {
+            let Ok((guard, _)) = cv.wait_timeout_while(guard, Duration::from_secs(retry_secs), |generation| {
                 !stop.load(Ordering::Acquire) && *generation == observed_gen
             }) else { break };
             observed_gen = *guard;
+            retry_secs = (retry_secs * 2).min(600);
         }
     }
 }

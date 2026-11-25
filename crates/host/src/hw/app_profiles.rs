@@ -37,6 +37,20 @@ enum Event {
     Rescan,
 }
 
+/// WQL condition matching the listed names, full or cut to 15 characters as the trace reports.
+fn name_filter(names: &[String]) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    for name in names {
+        let quoted = |n: &str| format!("ProcessName = '{}'", n.replace('\\', "\\\\").replace('\'', "\\'"));
+        parts.push(quoted(name));
+        let cut: String = name.chars().take(15).collect();
+        if cut != *name {
+            parts.push(quoted(&cut));
+        }
+    }
+    if parts.is_empty() { "ProcessID = 0".into() } else { parts.join(" OR ") }
+}
+
 /// The kernel trace reports image names cut to 15 characters ("cyberpunk2077.e").
 fn name_matches(listed: &str, reported: &str) -> bool {
     listed == reported || (reported.len() >= 14 && listed.starts_with(reported))
@@ -133,8 +147,11 @@ fn watch(sender: mpsc::Sender<Event>) {
         let sink: IWbemObjectSink = Sink { sender: sender.clone(), failed: failed.clone() }.into();
         let subscribed = connect_wmi(ROOT_CIMV2).and_then(|services| unsafe {
             let wql = BSTR::from("WQL");
-            for query in ["SELECT ProcessID, ProcessName FROM Win32_ProcessStartTrace", "SELECT ProcessID FROM Win32_ProcessStopTrace"] {
-                services.ExecNotificationQueryAsync(&wql, &BSTR::from(query), WBEM_FLAG_SEND_STATUS, None, &sink)?;
+            // Filtered in WMI: the host wakes only for the chosen programs, not every process.
+            let filter = name_filter(&settings::app_profiles());
+            for class in ["Win32_ProcessStartTrace", "Win32_ProcessStopTrace"] {
+                let query = format!("SELECT ProcessID, ProcessName FROM {class} WHERE {filter}");
+                services.ExecNotificationQueryAsync(&wql, &BSTR::from(query.as_str()), WBEM_FLAG_SEND_STATUS, None, &sink)?;
             }
             Ok(services)
         });
@@ -152,15 +169,11 @@ fn watch(sender: mpsc::Sender<Event>) {
         };
         // Events from before the subscription are not delivered: look at what runs now.
         let _ = sender.send(Event::Rescan);
-        // A list change keeps the subscription; only an empty list or a failure ends it.
-        let Ok(mut guard) = lock.lock() else { return };
-        loop {
-            guard = cv.wait_while(guard, |g| *g == seen && !failed.load(Ordering::Acquire)).unwrap_or_else(|e| e.into_inner());
-            seen = *guard;
-            if failed.load(Ordering::Acquire) || settings::app_profiles().is_empty() {
-                break;
-            }
-        }
+        // The query names the programs, so a list change, a failure or an empty list ends this
+        // subscription and the loop subscribes again with the new list.
+        let Ok(guard) = lock.lock() else { return };
+        let guard = cv.wait_while(guard, |g| *g == seen && !failed.load(Ordering::Acquire)).unwrap_or_else(|e| e.into_inner());
+        seen = *guard;
         drop(guard);
         unsafe {
             let _ = services.CancelAsyncCall(&sink);

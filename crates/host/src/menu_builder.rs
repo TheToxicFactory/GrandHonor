@@ -103,7 +103,7 @@ impl MenuBuilder {
             language: Some(grandhonor_core::locale::language().code().to_string()),
             notice: None,
             notice_is_error: false,
-            job_running: crate::updater::checking(),
+            job_running: crate::updater::checking() || crate::updater::installing(),
         };
         let mut state = state;
         if let Some((text, error)) = PANEL_NOTICE.lock().ok().and_then(|mut s| s.take()) {
@@ -371,7 +371,7 @@ pub fn build_panel_snapshot(ctx: &HostContext) -> (PanelState, HashMap<u32, Acti
         Some(t(
             "Обновления и резервная копия драйверов",
             "Driver updates and backup",
-            "HONOR 目录更新与驱动备份",
+            "驱动更新与备份",
         )),
         upd_badge.as_deref(),
         Some("drivers"),
@@ -404,8 +404,8 @@ pub fn build_panel_snapshot(ctx: &HostContext) -> (PanelState, HashMap<u32, Acti
         })),
         Some(t(
             "Вместо экранных подсказок, когда они выключены, и для важных событий зарядки",
-            "Tell me about mic, camera and mode changes",
-            "提示麦克风、摄像头和模式变化",
+            "Instead of on-screen notices when they are off, and for important charging events",
+            "屏幕提示关闭时代替提示，并用于重要充电事件",
         )),
         None,
         Some("switch"),
@@ -558,11 +558,16 @@ fn build_update_section(menu: &mut SubMenu<'_>, on_quit: Arc<dyn Fn() + Send + S
             let quit = on_quit.clone();
             menu.add_command_ex(
                 &title,
-                Some(Box::new(move || match updater::start_update(&release) {
-                    Ok(()) => quit(),
-                    Err(err) => show_error_box(&err),
+                Some(Box::new(move || {
+                    let quit = quit.clone();
+                    updater::start_update_in_background(release.clone(), move |result| match result {
+                        Ok(()) => quit(),
+                        Err(err) => show_error_box(&err),
+                    })
                 })),
-                Some(if installed {
+                Some(if updater::installing() {
+                    t("Загрузка и проверка…", "Downloading and checking…", "正在下载并校验…")
+                } else if installed {
                     t(
                         "Скачать, проверить и установить. Если что-то пойдёт не так, вернётся текущая версия",
                         "Download, check and install. If anything goes wrong, this version comes back",
@@ -575,7 +580,7 @@ fn build_update_section(menu: &mut SubMenu<'_>, on_quit: Arc<dyn Fn() + Send + S
                         "便携版：请从 GitHub 发布页面下载安装程序",
                     )
                 }),
-                None, Some("cta"), installed, false,
+                None, Some("cta"), installed && !updater::installing(), false,
             );
         }
         other => {
@@ -799,7 +804,7 @@ fn build_presets_section(menu: &mut SubMenu<'_>) {
     }
     let keep = t("Не менять", "Keep", "不变");
     let owned = |list: &[(u32, &str)]| list.iter().map(|(id, l)| (*id, l.to_string())).collect::<Vec<_>>();
-    let modes = owned(&[(1, t("Экономия", "Efficiency", "能效")), (2, t("Баланс", "Balanced", "平衡")), (3, t("Производ.", "Performance", "性能"))]);
+    let modes = owned(&[(1, t("Экономия", "Efficiency", "能效")), (2, t("Баланс", "Balanced", "平衡")), (3, t("Мощный", "Performance", "性能"))]);
     let lights = owned(&[(1, t("Выкл.", "Off", "关闭")), (2, t("Слабая", "Weak", "弱")), (3, t("Сильная", "Strong", "强"))]);
     let screens = owned(&[(31, "30%"), (51, "50%"), (71, "70%"), (101, "100%")]);
     let hz_label = t("Гц", "Hz", "赫兹");
@@ -894,7 +899,7 @@ fn build_battery_section(menu: &mut SubMenu<'_>) {
             .map(|c| format!(" · {c} {}", t("циклов", "cycles", "次循环")))
             .unwrap_or_default();
         let trend = crate::hw::battery_alerts::wear_trend(h.design_mwh)
-            .map(|(months, delta)| format!(" · {} {months} {}: {delta:+}%", t("за", "in", ""), t("мес.", "mo", "个月")))
+            .map(|(months, delta)| format!(" · {} {months} {}: {delta:+}%", t("за", "in", "近"), t("мес.", "mo", "个月")))
             .unwrap_or_default();
         format!(
             "{}% · {} {} {} {}{cycles}{trend}",
@@ -1012,9 +1017,9 @@ fn build_performance_section(menu: &mut SubMenu<'_>, on_mode_changed: Arc<dyn Fn
             t("Режим HUNTER активен", "HUNTER mode active", "HUNTER 模式已启用"),
             None,
             Some(t(
-                "Переключение выполняется в HONOR PC Manager.",
-                "Managed directly by HONOR PC Manager.",
-                "由 HONOR PC Manager 直接控制。",
+                "Игровой режим ноутбука. Пока он включён, профиль HONOR не меняется.",
+                "The laptop's gaming mode. While it is on, the HONOR profile does not change.",
+                "笔记本的游戏模式。开启期间 HONOR 模式不会改变。",
             )),
             Some("HUNTER"),
             Some("banner"),
@@ -1099,7 +1104,7 @@ fn build_device_check(menu: &mut SubMenu<'_>) {
         page.add_item(
             t("Устройства с ошибками", "Devices with a problem", "异常设备"),
             None, false, false,
-            Some(t("Нажмите на устройство, чтобы перезапустить его", "Click a device to restart it", "点击设备即可重新启动")),
+            Some(t("Откройте устройство: перезапуск или откат драйвера", "Open a device to restart it or roll back its driver", "打开设备以重新启动或回退驱动")),
         );
         for device in problems {
             let help = format!("{} {}: {}", t("Код", "Code", "代码"), device.problem, devices::problem_text(device.problem));

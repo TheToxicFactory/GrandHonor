@@ -71,6 +71,9 @@ const TIMER_DEVICE_CHANGE: usize = 1;
 /// Retries adding the tray icon while the taskbar is not ready yet (early at sign-in).
 const TIMER_TRAY_RETRY: usize = 2;
 const TRAY_RETRY_MS: u32 = 2_000;
+/// Retries for about 5 minutes; after that only Explorer's TaskbarCreated adds the icon.
+const TRAY_RETRY_LIMIT: u32 = 150;
+static TRAY_RETRIES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 const RESUME_DEBOUNCE_MS: u64 = 10_000;
 const RESUME_SETTLE_MS: u64 = 8_000;
@@ -100,10 +103,12 @@ struct AppRuntime {
 unsafe impl Send for AppRuntime {}
 unsafe impl Sync for AppRuntime {}
 
-static PENDING_NOTIFICATION: OnceLock<Mutex<Option<(String, String)>>> = OnceLock::new();
+/// Notifications waiting for the tray window; a few at most, so a burst (charger and battery
+/// at once) shows each instead of only the last.
+static PENDING_NOTIFICATION: OnceLock<Mutex<std::collections::VecDeque<(String, String)>>> = OnceLock::new();
 
-fn notify_queue() -> &'static Mutex<Option<(String, String)>> {
-    PENDING_NOTIFICATION.get_or_init(|| Mutex::new(None))
+fn notify_queue() -> &'static Mutex<std::collections::VecDeque<(String, String)>> {
+    PENDING_NOTIFICATION.get_or_init(|| Mutex::new(std::collections::VecDeque::new()))
 }
 
 pub fn run_tray_loop(activation_event: HANDLE, open_panel_at_start: bool) -> i32 {
@@ -179,7 +184,10 @@ pub fn run_tray_loop(activation_event: HANDLE, open_panel_at_start: bool) -> i32
             return;
         }
         if let Ok(mut q) = notify_queue().lock() {
-            *q = Some((title.to_string(), body.to_string()));
+            if q.len() >= 4 {
+                q.pop_front();
+            }
+            q.push_back((title.to_string(), body.to_string()));
         }
         unsafe {
             let _ = PostMessageW(
@@ -521,8 +529,13 @@ fn handle_oem_event(rt: &Arc<AppRuntime>, event: OemEvent) {
                 ),
             };
             let icon = if notice == ChargerNotice::WrongPort { Icon::Warning } else { Icon::Charger };
-            crate::osd::show(icon, title, None);
-            (rt.ctx.on_notify)(title, body);
+            // One notice, not two: the Windows notification carries the advice; without
+            // notifications the on-screen notice shows the title.
+            if settings::notifications_enabled() {
+                (rt.ctx.on_notify)(title, body);
+            } else {
+                crate::osd::show(icon, title, None);
+            }
         }
     }
 }
@@ -562,6 +575,8 @@ fn show_quick_menu(rt: &Arc<AppRuntime>, hwnd: HWND) {
         let _ = GetCursorPos(&mut pt);
         let _ = SetForegroundWindow(hwnd);
         let cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON | TPM_BOTTOMALIGN, pt.x, pt.y, None, hwnd, None);
+        // Without this message the menu may not close on the next click elsewhere (KB135788).
+        let _ = PostMessageW(Some(hwnd), windows::Win32::UI::WindowsAndMessaging::WM_NULL, WPARAM(0), LPARAM(0));
         let _ = DestroyMenu(menu);
         cmd.0 as usize
     };
@@ -648,7 +663,7 @@ fn cycle_profile(rt: &Arc<AppRuntime>) {
         let (icon, text) = match next {
             Profile::Economy => (Icon::Normal, t("Экономия", "Efficiency", "能效")),
             Profile::Balanced => (Icon::Balanced, t("Баланс", "Balanced", "平衡")),
-            Profile::Performance if honor_on => (Icon::Performance, t("Производительный", "Performance", "高性能")),
+            Profile::Performance if honor_on => (Icon::Performance, t("Мощный", "Performance", "高性能")),
             Profile::Performance => (Icon::Performance, t("Производительный · без зарядки", "Performance · on battery", "高性能 · 电池供电")),
         };
         notice(&rt, icon, text, None);
@@ -918,7 +933,7 @@ unsafe extern "system" fn wnd_proc(
         }
         WM_APP_NOTIFY => {
             if let Ok(mut q) = notify_queue().lock()
-                && let Some((title, body)) = q.take()
+                && let Some((title, body)) = q.pop_front()
             {
                 show_tray_balloon(rt, &title, &body);
             }
@@ -1030,7 +1045,14 @@ unsafe extern "system" fn wnd_proc(
                 unsafe {
                     let _ = KillTimer(Some(hwnd), TIMER_TRAY_RETRY);
                 }
+                TRAY_RETRIES.store(0, Ordering::Relaxed);
                 crate::log::info("Tray icon added after the taskbar became ready");
+            } else if TRAY_RETRIES.fetch_add(1, Ordering::Relaxed) + 1 >= TRAY_RETRY_LIMIT {
+                unsafe {
+                    let _ = KillTimer(Some(hwnd), TIMER_TRAY_RETRY);
+                }
+                TRAY_RETRIES.store(0, Ordering::Relaxed);
+                crate::log::info("Tray icon still not added; waiting for the taskbar to start");
             }
             LRESULT(0)
         }

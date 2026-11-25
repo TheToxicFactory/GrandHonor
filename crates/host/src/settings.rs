@@ -98,7 +98,11 @@ pub enum StoredValue {
 }
 
 /// Runtime state, not user choices: never exported or imported.
-const RUNTIME_VALUES: [&str; 12] = [
+const RUNTIME_VALUES: [&str; 15] = [
+    // Firmware and tray state, not the user's choice: never exported or imported.
+    "SmartChargeHolding",
+    "BatteryProtectionMode",
+    "TrayIconPromoted",
     "CpuProfileOriginal",
     "ProfileWriteTick",
     "AppProfileSaved",

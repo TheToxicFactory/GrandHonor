@@ -201,7 +201,8 @@ pub fn is_supported_device_path(path: &str) -> bool {
     let lower = path.to_ascii_lowercase();
     SUPPORTED_DEVICES
         .iter()
-        .any(|(vid, _)| lower.contains(&format!("vid_{vid:04x}")))
+        // Vendor and product: other HID devices of the same vendor must not restart the readers.
+        .any(|(vid, pid)| lower.contains(&format!("vid_{vid:04x}")) && lower.contains(&format!("pid_{pid:04x}")))
 }
 
 fn find_vendor_device() -> Option<HidDeviceInfo> {
