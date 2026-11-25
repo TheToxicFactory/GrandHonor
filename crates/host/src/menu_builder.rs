@@ -562,7 +562,7 @@ fn build_update_section(menu: &mut SubMenu<'_>, on_quit: Arc<dyn Fn() + Send + S
                     let quit = quit.clone();
                     updater::start_update_in_background(release.clone(), move |result| match result {
                         Ok(()) => quit(),
-                        Err(err) => show_error_box(&err),
+                        Err(err) => post_panel_error(&err),
                     })
                 })),
                 Some(if updater::installing() {
@@ -737,8 +737,8 @@ fn build_cpu_profile_section(menu: &mut SubMenu<'_>) {
         None, false, false,
         Some(t(
             "Тихий — прохладнее и дольше от батареи, Мощный — быстрее отклик и выше частоты",
-            "Quiet runs cooler and longer on battery, Performance responds faster with higher clocks",
-            "安静更凉爽、续航更长；性能响应更快、频率更高",
+            "Quiet runs cooler and longer on battery, Fast responds quicker with higher clocks",
+            "安静更凉爽、续航更长；强劲响应更快、频率更高",
         )),
     );
     for (ac, title) in [
@@ -753,14 +753,18 @@ fn build_cpu_profile_section(menu: &mut SubMenu<'_>) {
             (None, t("Windows", "Windows", "Windows")),
             (Some(Profile::Quiet), t("Тихий", "Quiet", "安静")),
             (Some(Profile::Balanced), t("Баланс", "Balanced", "平衡")),
-            (Some(Profile::Performance), t("Мощный", "Performance", "性能")),
+            (Some(Profile::Performance), t("Мощный", "Fast", "强劲")),
         ];
         for (profile, label) in options {
             seg.add_command_ex(
                 label,
                 Some(Box::new(move || {
+                    let previous = settings::cpu_profile(key);
                     settings::set_cpu_profile(key, profile.map(|p| p as u32));
                     if !apply() {
+                        // The panel must show what is in effect, not a choice Windows refused.
+                        settings::set_cpu_profile(key, previous);
+                        let _ = apply();
                         show_error_box(t(
                             "Windows не дала изменить схему питания",
                             "Windows refused to change the power scheme",
@@ -804,7 +808,7 @@ fn build_presets_section(menu: &mut SubMenu<'_>) {
     }
     let keep = t("Не менять", "Keep", "不变");
     let owned = |list: &[(u32, &str)]| list.iter().map(|(id, l)| (*id, l.to_string())).collect::<Vec<_>>();
-    let modes = owned(&[(1, t("Экономия", "Efficiency", "能效")), (2, t("Баланс", "Balanced", "平衡")), (3, t("Мощный", "Performance", "性能"))]);
+    let modes = owned(&[(1, t("Экономия", "Efficiency", "能效")), (2, t("Баланс", "Balanced", "平衡")), (3, t("Максимум", "Best performance", "最佳性能"))]);
     let lights = owned(&[(1, t("Выкл.", "Off", "关闭")), (2, t("Слабая", "Weak", "弱")), (3, t("Сильная", "Strong", "强"))]);
     let screens = owned(&[(31, "30%"), (51, "50%"), (71, "70%"), (101, "100%")]);
     let hz_label = t("Гц", "Hz", "赫兹");
@@ -1753,6 +1757,14 @@ fn report(msg: &str, error: bool) {
     let icon = if error { MB_ICONERROR } else { MB_ICONINFORMATION };
     unsafe {
         MessageBoxW(None, &text, &title, MB_OK | icon | MB_TOPMOST | MB_SETFOREGROUND);
+    }
+}
+
+/// An error from work a panel action started on a thread: a banner the next snapshot shows,
+/// never a message box (it would take the focus from a game or close the panel).
+pub fn post_panel_error(msg: &str) {
+    if let Ok(mut slot) = PANEL_NOTICE.lock() {
+        *slot = Some((msg.to_string(), true));
     }
 }
 

@@ -137,24 +137,36 @@ impl ActiveScheme {
     }
 }
 
-/// Saved scheme values: "scheme-guid|ac,dc;ac,dc;…" in `ROWS` order. A setting the scheme
-/// does not have (an older CPU without LP E-cores) is kept as "-,-".
+/// Saved scheme values: "scheme-guid|setting-guid=ac,dc;…", keyed by setting so a later
+/// version that adds or reorders `ROWS` still reads them. A setting the scheme does not have
+/// (an older CPU without LP E-cores) is kept as "-,-"; one missing from the text is left alone.
+/// The 2.5.4 form without setting GUIDs ("ac,dc;…" in `ROWS` order) is still read.
 fn encode(scheme: &GUID, values: &[(Option<u32>, Option<u32>)]) -> String {
     let opt = |v: Option<u32>| v.map_or("-".to_string(), |n| n.to_string());
-    let list: Vec<String> = values.iter().map(|(a, d)| format!("{},{}", opt(*a), opt(*d))).collect();
+    let list: Vec<String> =
+        ROWS.iter().zip(values).map(|(row, (a, d))| format!("{:?}={},{}", row.setting, opt(*a), opt(*d))).collect();
     format!("{:?}|{}", scheme, list.join(";"))
 }
 
 fn decode(text: &str) -> Option<(String, Vec<(Option<u32>, Option<u32>)>)> {
     let (scheme, list) = text.split_once('|')?;
-    let values: Vec<_> = list
-        .split(';')
-        .map(|pair| {
-            let (a, d) = pair.split_once(',').unwrap_or(("-", "-"));
-            (a.parse().ok(), d.parse().ok())
-        })
-        .collect();
-    (values.len() == ROWS.len()).then(|| (scheme.to_string(), values))
+    parse_guid(scheme)?;
+    let pair = |p: &str| {
+        let (a, d) = p.split_once(',').unwrap_or(("-", "-"));
+        (a.parse().ok(), d.parse().ok())
+    };
+    let items: Vec<&str> = list.split(';').collect();
+    let values = if items.iter().all(|i| i.contains('=')) {
+        let keyed: Vec<(GUID, (Option<u32>, Option<u32>))> =
+            items.iter().filter_map(|i| i.split_once('=')).filter_map(|(g, v)| Some((parse_guid(g)?, pair(v)))).collect();
+        ROWS.iter().map(|row| keyed.iter().find(|(g, _)| *g == row.setting).map_or((None, None), |(_, v)| *v)).collect()
+    } else if items.len() == 8 {
+        // 2.5.4: the same eight rows in the same order as now.
+        items.iter().map(|i| pair(i)).collect()
+    } else {
+        return None;
+    };
+    Some((scheme.to_string(), values))
 }
 
 fn restore_into(scheme: &ActiveScheme, values: &[(Option<u32>, Option<u32>)]) {
@@ -258,6 +270,9 @@ mod tests {
         assert_eq!(back, values);
         assert!(decode("garbage").is_none());
         assert_eq!(parse_guid(&format!("{scheme:?}")), Some(scheme));
+        // The 2.5.4 positional form still reads.
+        let old = format!("{scheme:?}|50,50;50,50;-,-;50,50;50,50;50,50;50,50;50,50");
+        assert_eq!(decode(&old).unwrap().1, back);
     }
 
     #[test]

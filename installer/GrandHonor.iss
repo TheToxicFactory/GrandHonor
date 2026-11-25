@@ -1,4 +1,4 @@
-﻿#ifndef AppVersion
+#ifndef AppVersion
   #error AppVersion must be supplied by build.ps1
 #endif
 #ifndef PayloadDir
@@ -211,6 +211,7 @@ var
   Wnd: HWND;
   Retries, Code: Integer;
   WasRunning: Boolean;
+  AppDir: String;
 begin
   Retries := 0;
   Wnd := FindWindowEx(0, 0, 'GrandHonorHostWindow', '');
@@ -226,7 +227,11 @@ begin
     use, so whatever is left of GrandHonor is ended. }
   if WasRunning then Sleep(1500);
   // Only the copy installed here: a portable copy elsewhere keeps running.
-  Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'), '-NoProfile -NonInteractive -Command "Get-Process GrandHonor,GrandHonor.Panel -ErrorAction SilentlyContinue | Where-Object { $_.Path -like ''' + ExpandConstant('{app}') + '\*'' } | Stop-Process -Force"', '', SW_HIDE, ewWaitUntilTerminated, Code);
+  { Exact folder match, quotes doubled for PowerShell; taskkill if PowerShell cannot run. }
+  AppDir := FixedRoot;
+  StringChangeEx(AppDir, '''', '''''', True);
+  if not Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'), '-NoProfile -NonInteractive -Command "Get-Process GrandHonor,GrandHonor.Panel -ErrorAction SilentlyContinue | Where-Object { $_.Path -and ([IO.Path]::GetDirectoryName($_.Path) -eq ''' + AppDir + ''') } | Stop-Process -Force"', '', SW_HIDE, ewWaitUntilTerminated, Code) then
+    Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM GrandHonor.exe', '', SW_HIDE, ewWaitUntilTerminated, Code);
 end;
 
 function InitializeSetup: Boolean;

@@ -92,7 +92,16 @@ fn fetch_latest() -> Result<Option<Release>, String> {
         return Err(rate_limit_message(response.rate_limit_reset));
     }
     if response.status != 200 {
-        return Err(format!("{} {}", grandhonor_core::locale::t("Ответ GitHub:", "GitHub answered", "GitHub 返回"), response.status));
+        return Err(if response.status == 403 {
+            grandhonor_core::locale::t(
+                "GitHub отказал в проверке (часто из-за VPN или лимита запросов). Повторите позже",
+                "GitHub refused the check (often a VPN or the request limit). Try again later",
+                "GitHub 拒绝了检查（常见于 VPN 或请求限制），请稍后重试",
+            )
+            .to_string()
+        } else {
+            format!("{} {}", grandhonor_core::locale::t("Ответ GitHub:", "GitHub answered", "GitHub 返回"), response.status)
+        });
     }
     parse_release(&response.body, env!("CARGO_PKG_VERSION"))
 }
@@ -105,25 +114,30 @@ fn is_rate_limited(body: &[u8]) -> bool {
 
 fn rate_limit_message(reset: Option<u64>) -> String {
     use grandhonor_core::locale::t;
-    let when = reset.and_then(|unix| {
+    let minutes = reset.and_then(|unix| {
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
-        let minutes = unix.saturating_sub(now).div_ceil(60).max(1);
-        Some(format!(" {} {minutes} {}", t("через", "in", "于"), t("мин", "min", "分钟后")))
+        Some(unix.saturating_sub(now).div_ceil(60).max(1))
     });
-    format!(
-        "{}{}",
-        t(
-            "GitHub временно ограничил проверки с вашего адреса (часто из-за VPN). Повторите",
-            "GitHub has paused checks from your address for a while (often a VPN). Try again",
+    // Whole sentences per language: word order differs, so no glued pieces.
+    match minutes {
+        Some(m) => t(
+            "GitHub временно ограничил проверки с вашего адреса (часто из-за VPN). Повторите через {m} мин",
+            "GitHub has paused checks from your address for a while (often a VPN). Try again in {m} min",
+            "GitHub 暂时限制了您的地址（常见于 VPN），请在 {m} 分钟后重试",
+        )
+        .replace("{m}", &m.to_string()),
+        None => t(
+            "GitHub временно ограничил проверки с вашего адреса (часто из-за VPN). Повторите позже",
+            "GitHub has paused checks from your address for a while (often a VPN). Try again later",
             "GitHub 暂时限制了您的地址（常见于 VPN），请稍后重试",
-        ),
-        when.unwrap_or_else(|| t(" позже", " later", "。").to_string()),
-    )
+        )
+        .to_string(),
+    }
 }
 
 fn parse_release(body: &[u8], current: &str) -> Result<Option<Release>, String> {
     let json: serde_json::Value = serde_json::from_slice(body).map_err(|e| e.to_string())?;
-    let tag = json["tag_name"].as_str().ok_or("Release has no tag")?;
+    let tag = json["tag_name"].as_str().ok_or(grandhonor_core::locale::t("У выпуска нет версии", "Release has no tag", "发布没有版本号"))?;
     let version = tag.trim_start_matches('v').to_string();
     if !is_newer_version(&version, current) {
         return Ok(None);
@@ -132,8 +146,8 @@ fn parse_release(body: &[u8], current: &str) -> Result<Option<Release>, String> 
         .as_array()
         .and_then(|assets| assets.iter().find(|a| a["name"].as_str() == Some(SETUP_ASSET)))
         .ok_or(grandhonor_core::locale::t("В выпуске нет установщика", "The release has no setup file", "发布中没有安装程序"))?;
-    let url = asset["browser_download_url"].as_str().ok_or("No download URL")?.to_string();
-    let size = asset["size"].as_u64().ok_or("No size")?;
+    let url = asset["browser_download_url"].as_str().ok_or(grandhonor_core::locale::t("Нет адреса загрузки", "No download URL", "没有下载地址"))?.to_string();
+    let size = asset["size"].as_u64().ok_or(grandhonor_core::locale::t("Не указан размер", "No size", "未注明大小"))?;
     let sha256 = asset["digest"]
         .as_str()
         .and_then(|d| d.strip_prefix("sha256:"))
@@ -236,8 +250,10 @@ pub fn start_update_in_background(release: Release, done: impl FnOnce(Result<(),
     }
     let spawned = std::thread::Builder::new().name("update-install".into()).spawn(move || {
         let result = start_update(&release);
-        INSTALLING.store(false, Ordering::Release);
+        // The result first: the panel keeps asking while INSTALLING is set, so the banner
+        // is in place before it stops.
         done(result);
+        INSTALLING.store(false, Ordering::Release);
     });
     if spawned.is_err() {
         INSTALLING.store(false, Ordering::Release);

@@ -663,7 +663,7 @@ fn cycle_profile(rt: &Arc<AppRuntime>) {
         let (icon, text) = match next {
             Profile::Economy => (Icon::Normal, t("Экономия", "Efficiency", "能效")),
             Profile::Balanced => (Icon::Balanced, t("Баланс", "Balanced", "平衡")),
-            Profile::Performance if honor_on => (Icon::Performance, t("Мощный", "Performance", "高性能")),
+            Profile::Performance if honor_on => (Icon::Performance, t("Производительный", "Performance", "高性能")),
             Profile::Performance => (Icon::Performance, t("Производительный · без зарядки", "Performance · on battery", "高性能 · 电池供电")),
         };
         notice(&rt, icon, text, None);
@@ -789,6 +789,9 @@ fn trigger_wake_recovery(rt: &Arc<AppRuntime>) {
             let t_bat = thread::spawn(move || rt_bat.battery_service.restore_after_resume(bat_gen));
             let _ = t_bl.join();
             let _ = t_bat.join();
+            // Recovery touched many pages (WMI, HID, display); give them back (the panel is
+            // its own process, so this costs it nothing).
+            crate::footprint::trim_working_set();
         })
         .ok();
 }
@@ -1072,6 +1075,7 @@ unsafe extern "system" fn wnd_proc(
                 rt_arc.touchpad_service.restart();
                 reapply_haptics();
                 reapply_gestures();
+                crate::footprint::trim_working_set();
             });
             LRESULT(0)
         }
