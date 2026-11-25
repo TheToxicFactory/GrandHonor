@@ -301,6 +301,7 @@ pub fn build_panel_snapshot(ctx: &HostContext) -> (PanelState, HashMap<u32, Acti
             );
         }
     }
+    build_cpu_profile_section(&mut power);
     power.add_separator();
     build_performance_section(&mut power, ctx.on_update_tray_icon.clone());
     power.add_separator();
@@ -723,6 +724,59 @@ fn build_night_section(menu: &mut SubMenu<'_>) {
 }
 
 /// "When the charger changes": per power source presets (see presets.rs).
+/// Power → Processor profile: Quiet / Balanced / Performance for the charger and for battery.
+fn build_cpu_profile_section(menu: &mut SubMenu<'_>) {
+    use crate::hw::cpu_profile::{Profile, apply, chosen};
+    menu.add_item(
+        t("Профиль процессора", "Processor profile", "处理器配置"),
+        None, false, false,
+        Some(t(
+            "Тихий — прохладнее и дольше от батареи, Мощный — быстрее отклик и выше частоты",
+            "Quiet runs cooler and longer on battery, Performance responds faster with higher clocks",
+            "安静更凉爽、续航更长；性能响应更快、频率更高",
+        )),
+    );
+    for (ac, title) in [
+        (true, t("От сети", "Plugged in", "接通电源")),
+        (false, t("От батареи", "On battery", "使用电池")),
+    ] {
+        menu.add_item(title, None, false, false, None);
+        let current = chosen(ac);
+        let mut seg = menu.add_container("", "segment");
+        let key = if ac { "Ac" } else { "Dc" };
+        let options: [(Option<Profile>, &'static str); 4] = [
+            (None, t("Windows", "Windows", "Windows")),
+            (Some(Profile::Quiet), t("Тихий", "Quiet", "安静")),
+            (Some(Profile::Balanced), t("Баланс", "Balanced", "平衡")),
+            (Some(Profile::Performance), t("Мощный", "Performance", "性能")),
+        ];
+        for (profile, label) in options {
+            seg.add_command_ex(
+                label,
+                Some(Box::new(move || {
+                    settings::set_cpu_profile(key, profile.map(|p| p as u32));
+                    if !apply() {
+                        show_error_box(t(
+                            "Windows не дала изменить схему питания",
+                            "Windows refused to change the power scheme",
+                            "Windows 拒绝更改电源计划",
+                        ));
+                        return;
+                    }
+                    let icon = match profile {
+                        Some(Profile::Performance) => Icon::Performance,
+                        Some(Profile::Quiet) => Icon::Normal,
+                        _ => Icon::Balanced,
+                    };
+                    let source = if ac { t("От сети", "Plugged in", "接通电源") } else { t("От батареи", "On battery", "使用电池") };
+                    crate::osd::show(icon, &format!("{source}: {label}"), None);
+                })),
+                None, None, Some("pill"), true, current == profile,
+            );
+        }
+    }
+}
+
 fn build_presets_section(menu: &mut SubMenu<'_>) {
     use crate::presets::{BACKLIGHT, BRIGHTNESS, MODE, REFRESH};
     menu.add_item(

@@ -18,6 +18,8 @@ Every change shows a short notice above the taskbar. Turn notices off in **Syste
 
 **Power mode** is the Windows switch from Settings → Power: Efficiency, Balanced, Performance. Windows remembers one mode for the charger and one for battery. `Fn+P` cycles Efficiency → Balanced → Performance.
 
+**Processor profile** — chosen separately for the charger and for battery: **Quiet** (no turbo, cooler and quieter, longer on battery), **Balanced** (Windows' own settings), **Performance** (faster response and higher clocks). **Windows** leaves the power plan as it is; the plan's own values come back when both are set to Windows and when GrandHonor is uninstalled.
+
 **Performance mode (HONOR)** switches the firmware profile; it needs the charger and at least 20 % battery.
 
 **Battery protection** keeps the battery healthy on a laptop that is often plugged in:

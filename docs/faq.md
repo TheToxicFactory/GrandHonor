@@ -18,7 +18,7 @@ In the background only `GrandHonor.exe` runs, in Windows' efficiency mode, witho
 The **Windows power mode** (Efficiency / Balanced / Performance) is what really changes speed and fan noise. **HONOR Performance** switches the firmware profile; on the tested ZQC-P it made no measurable difference under load, because the processor is held by its own thermal limits. Both are kept and restored after sleep and restart.
 
 ### Where is the CPU power limit?
-It was removed: it could not hold a watt limit reliably. If an earlier version had lowered the processor setting, it is put back automatically. For a cooler, quieter laptop use Efficiency mode or **Quiet nights**.
+It was removed: it could not hold a watt limit reliably. If an earlier version had lowered the processor setting, it is put back automatically. For a cooler, quieter laptop choose the **Quiet** processor profile, Efficiency mode or **Quiet nights**.
 
 ### A sensor shows a dash.
 The firmware did not answer, or the reading is older than 3 seconds. GrandHonor never shows a guessed or outdated number.

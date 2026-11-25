@@ -243,6 +243,8 @@ fn main() -> ExitCode {
         CliAction::UninstallPrivilegedTasks => run_action(true, || {
             // Never leave a capped processor behind after removal.
             hw::cpu_limit::restore_original();
+            // Give the power scheme its own processor values back.
+            hw::cpu_profile::restore_original();
             // Give HONOR its own on-screen display back if GrandHonor had replaced it.
             if hw::honor_osd::replaced() {
                 let _ = hw::honor_osd::set_replaced(false);

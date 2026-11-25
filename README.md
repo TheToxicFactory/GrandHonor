@@ -34,7 +34,7 @@ HONOR PC Manager shows ads, feels heavy and often misbehaves — yet without it 
 
 | | |
 |---|---|
-| ⚡ **Power** | Live CPU and battery temperature, fans, watts and charge limit · Windows power modes and HONOR Performance (`Fn+P`) · presets for charger and battery · **Quiet nights** · **App profiles** for games and heavy apps |
+| ⚡ **Power** | Live CPU and battery temperature, fans, watts and charge limit · Windows power modes, **processor profiles** for charger and battery, and HONOR Performance (`Fn+P`) · presets for charger and battery · **Quiet nights** · **App profiles** for games and heavy apps |
 | 🔋 **Battery** | Charge limits (Home 40–70 %, Office 70–90 %, Travel) · **Smart charging** · **Charge to 100 % once** · battery health and its change over time · notices at the limit, at 20 %, when hot and after sleep |
 | 🖥 **Display** | 60 / 120 Hz · colour profiles **Vivid, sRGB, P3** · **Eye comfort** with a warmth slider, E-book and Soft modes · **Eye-break** reminders |
 | ⌨️ **Keyboard** | Backlight level, auto-off and schedule · your own action for the **Copilot** and **YOYO** keys |

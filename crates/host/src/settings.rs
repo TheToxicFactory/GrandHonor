@@ -98,7 +98,8 @@ pub enum StoredValue {
 }
 
 /// Runtime state, not user choices: never exported or imported.
-const RUNTIME_VALUES: [&str; 11] = [
+const RUNTIME_VALUES: [&str; 12] = [
+    "CpuProfileOriginal",
     "ProfileWriteTick",
     "AppProfileSaved",
     "NightModeSavedAc",
@@ -773,6 +774,25 @@ pub fn cpu_cap_original(source: &str) -> Option<u32> {
 
 pub fn set_cpu_cap_original(source: &str, value: Option<u32>) {
     write_u32(&format!("CpuCapOriginal{source}"), value);
+}
+
+/// Processor profile per power source ("Ac"/"Dc"): 1 Quiet, 2 Balanced, 3 Performance; `None`
+/// leaves the Windows scheme as it is (see `hw/cpu_profile.rs`).
+pub fn cpu_profile(source: &str) -> Option<u32> {
+    read_u32(&format!("CpuProfile{source}"))
+}
+
+pub fn set_cpu_profile(source: &str, value: Option<u32>) {
+    write_u32(&format!("CpuProfile{source}"), value);
+}
+
+/// The active scheme's own processor values before a profile changed them (runtime state).
+pub fn cpu_profile_original() -> Option<String> {
+    read_str("CpuProfileOriginal")
+}
+
+pub fn set_cpu_profile_original(value: Option<&str>) {
+    write_str("CpuProfileOriginal", value);
 }
 
 /// Per power source presets ("Ac"/"Dc"): applied when the charger is plugged in or removed.

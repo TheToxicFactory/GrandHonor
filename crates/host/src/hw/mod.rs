@@ -9,6 +9,7 @@ pub mod camera;
 pub mod com;
 pub mod cpu_limit;
 pub mod cpu_power;
+pub mod cpu_profile;
 pub mod display;
 pub mod devices;
 pub mod display_filter;

@@ -269,6 +269,9 @@ pub fn run_tray_loop(activation_event: HANDLE, open_panel_at_start: bool) -> i32
     // A fresh copy of the user's settings at every start (see settings_transfer.rs).
     let _ = std::thread::Builder::new().name("settings-backup".into()).spawn(crate::settings_transfer::refresh_backup);
     crate::hw::cpu_limit::restore_original();
+    if crate::hw::cpu_profile::chosen(true).is_some() || crate::hw::cpu_profile::chosen(false).is_some() {
+        let _ = crate::hw::cpu_profile::apply();
+    }
     crate::presets::start();
     let _ = std::thread::Builder::new()
         .name("startup-trim".into())
