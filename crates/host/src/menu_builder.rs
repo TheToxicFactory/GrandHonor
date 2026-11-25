@@ -607,12 +607,22 @@ fn build_update_section(menu: &mut SubMenu<'_>, on_quit: Arc<dyn Fn() + Send + S
         }
     }
     if let Some(previous) = updater::rollback_version().filter(|v| v != version) {
-        let title = format!("{} {previous}", t("Вернуть версию", "Roll back to", "回退到版本"));
+        // Hard to undo (GrandHonor closes and its files are replaced): two clicks.
+        let title = if is_armed("rollback") {
+            format!("{} {previous}", t("Нажмите ещё раз, чтобы вернуть", "Click again to roll back to", "再次点击以回退到"))
+        } else {
+            format!("{} {previous}", t("Вернуть версию", "Roll back to", "回退到版本"))
+        };
         menu.add_command_ex(
             &title,
-            Some(Box::new(move || match updater::start_rollback() {
-                Ok(()) => on_quit(),
-                Err(err) => show_error_box(&err),
+            Some(Box::new(move || {
+                if !confirmed("rollback") {
+                    return;
+                }
+                match updater::start_rollback() {
+                    Ok(()) => on_quit(),
+                    Err(err) => show_error_box(&err),
+                }
             })),
             Some(if installed {
                 t(
@@ -1758,6 +1768,13 @@ fn report(msg: &str, error: bool) {
         if let Ok(mut slot) = PANEL_NOTICE.lock() {
             *slot = Some((msg.to_string(), error));
         }
+        return;
+    }
+    // Outside a panel action (a background thread, a failed panel start) a message box would
+    // jump over a game: an on-screen notice instead, and the text goes to the log.
+    if crate::tray::host_running_here() {
+        crate::log::info(&format!("Notice: {msg}"));
+        crate::osd::notify(if error { crate::osd::Icon::Warning } else { crate::osd::Icon::Normal }, msg);
         return;
     }
     let text = HSTRING::from(msg);

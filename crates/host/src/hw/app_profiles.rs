@@ -116,11 +116,21 @@ fn send(event: Event) {
 
 /// The list of programs changed: re-check what runs, subscribe or unsubscribe.
 pub fn settings_changed() {
+    // The threads start with the first chosen program, not at sign-in.
+    start();
     send(Event::Rescan);
     wake();
 }
 
-pub fn start() {
+/// Starts watching when there is something to do: a chosen program, or a mode to restore
+/// after a crash mid-game.
+pub fn start_if_needed() {
+    if !settings::app_profiles().is_empty() || settings::app_profile_saved().is_some() {
+        start();
+    }
+}
+
+fn start() {
     static STARTED: OnceLock<()> = OnceLock::new();
     STARTED.get_or_init(|| {
         let (tx, rx) = mpsc::channel();
@@ -151,7 +161,11 @@ fn watch(sender: mpsc::Sender<Event>) {
             let filter = name_filter(&settings::app_profiles());
             for class in ["Win32_ProcessStartTrace", "Win32_ProcessStopTrace"] {
                 let query = format!("SELECT ProcessID, ProcessName FROM {class} WHERE {filter}");
-                services.ExecNotificationQueryAsync(&wql, &BSTR::from(query.as_str()), WBEM_FLAG_SEND_STATUS, None, &sink)?;
+                if let Err(err) = services.ExecNotificationQueryAsync(&wql, &BSTR::from(query.as_str()), WBEM_FLAG_SEND_STATUS, None, &sink) {
+                    // The first query may already be running: cancel it before trying again.
+                    let _ = services.CancelAsyncCall(&sink);
+                    return Err(err);
+                }
             }
             Ok(services)
         });

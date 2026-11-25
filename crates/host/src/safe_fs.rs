@@ -21,7 +21,7 @@ fn is_reparse_point(path: &Path) -> bool {
 pub fn prepare_dir(dir: &Path) -> Result<(), String> {
     fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     if dir.ancestors().any(is_reparse_point) {
-        return Err(format!("{} is a link; GrandHonor does not write through links", dir.display()));
+        return Err(format!("{}: {}", dir.display(), grandhonor_core::locale::t("это ссылка, GrandHonor не пишет через ссылки", "is a link; GrandHonor does not write through links", "是链接，GrandHonor 不通过链接写入")));
     }
     Ok(())
 }
@@ -47,7 +47,7 @@ fn open_no_follow(path: &Path, append: bool) -> Result<fs::File, String> {
 
 /// Writes the whole file through a temporary file and a rename.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    let dir = path.parent().ok_or("No folder")?;
+    let dir = path.parent().ok_or(grandhonor_core::locale::t("Нет папки", "No folder", "没有文件夹"))?;
     prepare_dir(dir)?;
     let tmp = path.with_extension(format!(
         "{}.tmp",
@@ -65,7 +65,7 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
 
 /// Appends to a file, creating it when missing.
 pub fn append(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    let dir = path.parent().ok_or("No folder")?;
+    let dir = path.parent().ok_or(grandhonor_core::locale::t("Нет папки", "No folder", "没有文件夹"))?;
     prepare_dir(dir)?;
     remove_link(path)?;
     open_no_follow(path, true)?.write_all(bytes).map_err(|e| e.to_string())

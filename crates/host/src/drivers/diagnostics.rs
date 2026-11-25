@@ -127,7 +127,7 @@ impl DriverPanel {
             )),
             None,
             Some("cta"),
-            true,
+            !installing(),
             false,
         );
 
@@ -288,7 +288,7 @@ impl DriverPanel {
                     )),
                     None,
                     Some("cta"),
-                    true,
+                    !installing(),
                     false,
                 );
             }
@@ -330,7 +330,7 @@ impl DriverPanel {
                         )),
                         None,
                         Some("cta"),
-                        true,
+                        !installing(),
                         false,
                     );
                 }
@@ -468,6 +468,11 @@ impl DriverPanel {
                 this.install_direct(&update, false);
             }
             INSTALLING.store(false, Ordering::Release);
+            // The panel may be closed by now: the result is on the Drivers page.
+            crate::osd::notify(
+                crate::osd::Icon::Normal,
+                t("Установка завершена — итог на странице «Драйверы»", "Install finished — see the Drivers page", "安装已结束，结果见「驱动」页面"),
+            );
         });
         if spawned.is_err() {
             INSTALLING.store(false, Ordering::Release);

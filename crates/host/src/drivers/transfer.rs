@@ -155,11 +155,12 @@ pub fn export_drivers(archive_path: &Path) -> DriverTransferResult {
         }
 
         let target = std::path::absolute(archive_path).map_err(|e| e.to_string())?;
-        let dir = target.parent().ok_or("Invalid archive destination")?;
-        fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+        let dir = target.parent().ok_or(grandhonor_core::locale::t("Неверная папка для архива", "Invalid archive destination", "无效的存档位置"))?;
+        // The elevated host writes into a folder the user chose: never through a link.
+    crate::safe_fs::prepare_dir(dir)?;
         let temp_zip = dir.join(format!(".GrandHonor-{}.tmp", unique_id()));
         create_zip_from_directory(&staging, &temp_zip).map_err(|e| e.to_string())?;
-        if let Err(err) = fs::rename(&temp_zip, &target) {
+        if let Err(err) = crate::safe_fs::rename(&temp_zip, &target) {
             let _ = fs::remove_file(&temp_zip);
             return Err(err.to_string());
         }

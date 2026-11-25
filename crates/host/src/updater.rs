@@ -358,7 +358,7 @@ fn restore_backup() -> Result<(), String> {
             }
         });
         if !ok {
-            return Err(format!("Could not restore {file}: {last}"));
+            return Err(format!("{} {file}: {last}", grandhonor_core::locale::t("Не удалось восстановить", "Could not restore", "无法恢复")));
         }
     }
     Ok(())

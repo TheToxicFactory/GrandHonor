@@ -169,9 +169,12 @@ pub fn apply_profile(profile: Profile) -> bool {
         crate::log::error(&format!("Could not set Windows power mode: {err}"));
     }
     let honor = honor && can_enable_performance_mode().is_ok() && !settings::hunter_mode_active();
+    // Fn+P changes HONOR Performance for now but keeps the choice made in the panel, so a
+    // step to Efficiency does not turn the saved choice off (it comes back on plug-in/resume).
     if settings::performance_mode_active() != honor {
-        if let Err(err) = apply_power_unlock_and_save(honor) {
-            crate::log::error_with("Could not switch the HONOR profile", &err);
+        match set_power_unlock(honor) {
+            Ok(()) => settings::set_performance_mode_active(honor),
+            Err(err) => crate::log::error_with("Could not switch the HONOR profile", &err),
         }
     }
     honor
@@ -182,7 +185,7 @@ pub fn set_power_unlock(enabled: bool) -> Result<(), WmiError> {
         can_enable_performance_mode().map_err(WmiError::Unavailable)?;
         if settings::hunter_mode_active() {
             return Err(WmiError::Unavailable(
-                "HONOR HUNTER mode is active.".to_string(),
+                t("Включён режим HUNTER.", "HUNTER mode is on.", "HUNTER 模式已开启。").to_string(),
             ));
         }
     }

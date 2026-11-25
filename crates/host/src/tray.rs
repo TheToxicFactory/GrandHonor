@@ -111,7 +111,15 @@ fn notify_queue() -> &'static Mutex<std::collections::VecDeque<(String, String)>
     PENDING_NOTIFICATION.get_or_init(|| Mutex::new(std::collections::VecDeque::new()))
 }
 
+static TRAY_RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// True in the tray host (not in a CLI helper): messages then become on-screen notices.
+pub fn host_running_here() -> bool {
+    TRAY_RUNNING.load(Ordering::Acquire)
+}
+
 pub fn run_tray_loop(activation_event: HANDLE, open_panel_at_start: bool) -> i32 {
+    TRAY_RUNNING.store(true, Ordering::Release);
     settings::seed_preferred_battery_protection();
 
     let hinstance: HINSTANCE = unsafe { GetModuleHandleW(None) }
@@ -347,7 +355,7 @@ fn start_hardware_services(rt: Arc<AppRuntime>) {
             crate::hw::battery_alerts::record_capacity();
             crate::hw::break_reminder::start();
             crate::hw::night_mode::start();
-            crate::hw::app_profiles::start();
+            crate::hw::app_profiles::start_if_needed();
             // GrandHonor shows every HONOR notice itself: keep HONOR's own OSD service off so
             // nothing appears twice. Uninstalling GrandHonor turns it back on (main.rs).
             if crate::hw::honor_osd::installed() && !crate::hw::honor_osd::replaced() {

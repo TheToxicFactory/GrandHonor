@@ -148,6 +148,18 @@ fn encode(scheme: &GUID, values: &[(Option<u32>, Option<u32>)]) -> String {
     format!("{:?}|{}", scheme, list.join(";"))
 }
 
+/// The settings of 2.5.4, in the order it saved them.
+const ORDER_254: [GUID; 8] = [
+    GUID::from_u128(0x36687f9e_e3a5_4dbf_b1dc_15eb381c6863),
+    GUID::from_u128(0x36687f9e_e3a5_4dbf_b1dc_15eb381c6864),
+    GUID::from_u128(0x36687f9e_e3a5_4dbf_b1dc_15eb381c6865),
+    GUID::from_u128(0xbe337238_0d82_4146_a960_4f3749d470c7),
+    GUID::from_u128(0x45bcc044_d885_43e2_8605_ee0ec6e96b59),
+    GUID::from_u128(0x0cc5b647_c1df_4637_891a_dec35c318583),
+    GUID::from_u128(0x06cadf0e_64ed_448a_8927_ce7bf90eb35d),
+    GUID::from_u128(0x12a0ab44_fe28_4fa9_b3bd_4b64f44960a6),
+];
+
 fn decode(text: &str) -> Option<(String, Vec<(Option<u32>, Option<u32>)>)> {
     let (scheme, list) = text.split_once('|')?;
     parse_guid(scheme)?;
@@ -160,9 +172,11 @@ fn decode(text: &str) -> Option<(String, Vec<(Option<u32>, Option<u32>)>)> {
         let keyed: Vec<(GUID, (Option<u32>, Option<u32>))> =
             items.iter().filter_map(|i| i.split_once('=')).filter_map(|(g, v)| Some((parse_guid(g)?, pair(v)))).collect();
         ROWS.iter().map(|row| keyed.iter().find(|(g, _)| *g == row.setting).map_or((None, None), |(_, v)| *v)).collect()
-    } else if items.len() == 8 {
-        // 2.5.4: the same eight rows in the same order as now.
-        items.iter().map(|i| pair(i)).collect()
+    } else if items.len() == ORDER_254.len() {
+        // 2.5.4 wrote the values by position in its own row order, fixed here so a later
+        // change of `ROWS` cannot shift them.
+        let old: Vec<(GUID, (Option<u32>, Option<u32>))> = ORDER_254.iter().zip(&items).map(|(g, i)| (*g, pair(i))).collect();
+        ROWS.iter().map(|row| old.iter().find(|(g, _)| *g == row.setting).map_or((None, None), |(_, v)| *v)).collect()
     } else {
         return None;
     };
@@ -180,15 +194,22 @@ fn restore_into(scheme: &ActiveScheme, values: &[(Option<u32>, Option<u32>)]) {
     }
 }
 
-/// Writes the chosen profiles into the active scheme, or puts the scheme's own values back
-/// when neither source has one. Called after a choice in the panel and once at start (Windows
-/// updates can reset schemes). Returns false when Windows refused a write.
 /// Every scheme the profiles have written into keeps its own entry, so switching schemes
 /// never loses the values of the one written before. Entries are joined with '/'.
 type Saved = Vec<(String, Vec<(Option<u32>, Option<u32>)>)>;
 
 fn load_saved() -> Saved {
-    settings::cpu_profile_original().map_or_else(Vec::new, |t| t.split('/').filter_map(decode).collect())
+    settings::cpu_profile_original().map_or_else(Vec::new, |t| {
+        t.split('/')
+            .filter_map(|entry| {
+                let parsed = decode(entry);
+                if parsed.is_none() {
+                    crate::log::error(&format!("Processor profile: saved scheme values not readable, dropped: {entry}"));
+                }
+                parsed
+            })
+            .collect()
+    })
 }
 
 fn store_saved(saved: &Saved) {
@@ -212,6 +233,9 @@ fn restore_all(saved: &Saved) {
     }
 }
 
+/// Writes the chosen profiles into the active scheme, or puts the scheme's own values back
+/// when neither source has one. Called after a choice in the panel and once at start (Windows
+/// updates can reset schemes). Returns false when Windows refused a write.
 pub fn apply() -> bool {
     let Some(scheme) = ActiveScheme::get() else { return false };
     let mut saved = load_saved();
