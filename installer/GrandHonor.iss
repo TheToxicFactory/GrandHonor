@@ -230,7 +230,7 @@ begin
   { Exact folder match, quotes doubled for PowerShell; taskkill if PowerShell cannot run. }
   AppDir := FixedRoot;
   StringChangeEx(AppDir, '''', '''''', True);
-  if not Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'), '-NoProfile -NonInteractive -Command "Get-Process GrandHonor,GrandHonor.Panel -ErrorAction SilentlyContinue | Where-Object { $_.Path -and ([IO.Path]::GetDirectoryName($_.Path) -eq ''' + AppDir + ''') } | Stop-Process -Force; exit 0"', '', SW_HIDE, ewWaitUntilTerminated, Code) or (Code <> 0) then begin
+  if not Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'), '-NoProfile -NonInteractive -Command "try { Get-Process GrandHonor,GrandHonor.Panel -ErrorAction SilentlyContinue | Where-Object { $_.Path -and ([IO.Path]::GetDirectoryName($_.Path) -eq ''' + AppDir + ''') } | Stop-Process -Force -ErrorAction Stop } catch { exit 1 }; exit 0"', '', SW_HIDE, ewWaitUntilTerminated, Code) or (Code <> 0) then begin
     { Last resort when PowerShell cannot run or failed: by image name (also ends a portable copy). }
     Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM GrandHonor.exe', '', SW_HIDE, ewWaitUntilTerminated, Code);
     Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM GrandHonor.Panel.exe', '', SW_HIDE, ewWaitUntilTerminated, Code);

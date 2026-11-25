@@ -1780,6 +1780,10 @@ fn report(msg: &str, error: bool) {
             (crate::osd::Icon::Normal, "GrandHonor")
         };
         crate::osd::notify_detail(icon, title, msg);
+        // With Windows notifications off the text would be lost: the panel shows it next time.
+        if let Ok(mut slot) = PANEL_NOTICE.lock() {
+            *slot = Some((msg.to_string(), error));
+        }
         return;
     }
     let text = HSTRING::from(msg);

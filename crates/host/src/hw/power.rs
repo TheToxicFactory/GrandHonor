@@ -168,6 +168,7 @@ pub fn apply_profile(profile: Profile) -> bool {
     if let Err(err) = set_windows_power_mode(mode) {
         crate::log::error(&format!("Could not set Windows power mode: {err}"));
     }
+    FN_P_SUSPENDED.store(profile != Profile::Performance, std::sync::atomic::Ordering::Release);
     let honor = honor && can_enable_performance_mode().is_ok() && !settings::hunter_mode_active();
     // Fn+P changes HONOR Performance for now but keeps the choice made in the panel, so a
     // step to Efficiency does not turn the saved choice off (it comes back on plug-in/resume).
@@ -205,8 +206,14 @@ pub fn suspend_performance() -> Result<(), WmiError> {
 /// Brings HONOR Performance back when the user chose it and the charger, 20 % and no HUNTER
 /// allow it: at start-up (the firmware forgets it on reboot), after sleep and on plug-in.
 /// Returns true when it was turned on.
+/// Set when Fn+P stepped away from Performance and turned HONOR Performance off: the saved
+/// choice then waits until the user picks Performance again (Fn+P or the panel), instead of
+/// coming back on the next plug-in or wake under Efficiency.
+static FN_P_SUSPENDED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 pub fn restore_performance_preference() -> bool {
-    if !settings::power_unlock_preference()
+    if FN_P_SUSPENDED.load(std::sync::atomic::Ordering::Acquire)
+        || !settings::power_unlock_preference()
         || settings::performance_mode_active()
         || settings::hunter_mode_active()
         || can_enable_performance_mode().is_err()
@@ -228,6 +235,8 @@ pub fn restore_performance_preference() -> bool {
 
 pub fn apply_power_unlock_and_save(enabled: bool) -> Result<(), WmiError> {
     set_power_unlock(enabled)?;
+    // An explicit choice in the panel ends a Fn+P suspension.
+    FN_P_SUSPENDED.store(false, std::sync::atomic::Ordering::Release);
     settings::set_power_unlock(Some(enabled));
     settings::set_performance_mode_active(enabled);
     Ok(())

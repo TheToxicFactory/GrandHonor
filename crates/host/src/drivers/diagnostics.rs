@@ -196,7 +196,7 @@ impl DriverPanel {
             Some(t("Сохранить все драйверы в архив", "Save all drivers to an archive", "将所有驱动保存为压缩包")),
             None,
             Some("card"),
-            true,
+            !busy(),
             false,
         );
         let this_imp = self.clone();
@@ -206,7 +206,7 @@ impl DriverPanel {
             Some(t("Вернуть драйверы из архива", "Restore drivers from an archive", "从压缩包还原驱动")),
             None,
             Some("card"),
-            true,
+            !busy(),
             false,
         );
     }
@@ -353,7 +353,7 @@ impl DriverPanel {
                 )),
                 None,
                 Some(if comp.id == BIOS_ID { "cta" } else { "card" }),
-                true,
+                !busy(),
                 false,
             );
         }

@@ -141,6 +141,8 @@ struct Panel {
     path: Vec<String>,
     busy: bool,
     polling: bool,
+    /// A follow-up request for a running host job is scheduled (one chain per panel).
+    job_poll: bool,
     pending_command: Option<Pending>,
     /// Bumped by every request; the slow-host timer compares it.
     request_seq: u64,
@@ -360,7 +362,8 @@ impl Panel {
                         }
                         let job = snapshot.job_running;
                         panel.snapshot = Some(snapshot);
-                        if job {
+                        if job && !panel.job_poll {
+                            panel.job_poll = true;
                             let timer = cx.background_executor().clone();
                             cx.spawn(async move |panel, cx| {
                                 // Ask again in a second; if a sensor poll or a command is in
@@ -370,6 +373,8 @@ impl Panel {
                                 for _ in 0..40 {
                                     let sent = panel.update(cx, |panel, cx| {
                                         if !panel.busy && !panel.polling {
+                                            // The answer starts the next link if the job still runs.
+                                            panel.job_poll = false;
                                             panel.request(0, cx);
                                             true
                                         } else {
@@ -381,6 +386,7 @@ impl Panel {
                                     }
                                     timer.timer(Duration::from_millis(250)).await;
                                 }
+                                let _ = panel.update(cx, |panel, _| panel.job_poll = false);
                             })
                             .detach();
                         }
@@ -2593,6 +2599,7 @@ fn main() {
                         path: Vec::new(),
                         busy: false,
                         polling: false,
+                        job_poll: false,
                         pending_command: None,
                         request_seq: 0,
                         host_slow: false,

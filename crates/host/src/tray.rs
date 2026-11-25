@@ -736,6 +736,8 @@ fn disable_performance_mode(rt: &Arc<AppRuntime>) {
 fn restore_performance(rt: &Arc<AppRuntime>) {
     if crate::hw::power::restore_performance_preference() {
         (rt.ctx.on_update_tray_icon)();
+        // The firmware call and the icon touched pages that stay unused while hidden.
+        crate::footprint::trim_working_set();
     }
 }
 
