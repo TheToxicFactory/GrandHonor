@@ -212,7 +212,11 @@ pub fn suspend_performance() -> Result<(), WmiError> {
 static FN_P_SUSPENDED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 pub fn restore_performance_preference() -> bool {
+    // HONOR Performance belongs with the Windows Performance mode (that is what Fn+P sets):
+    // after a restart, sleep or plug-in under Efficiency or Balanced it stays off. This holds
+    // across restarts and for every way the Windows mode was changed.
     if FN_P_SUSPENDED.load(std::sync::atomic::Ordering::Acquire)
+        || current_profile() != Profile::Performance
         || !settings::power_unlock_preference()
         || settings::performance_mode_active()
         || settings::hunter_mode_active()

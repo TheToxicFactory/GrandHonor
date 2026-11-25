@@ -662,8 +662,11 @@ fn run_key_action(rt: &Arc<AppRuntime>, key: &'static str) {
 /// Fn+P: Economy → Balanced → Performance → Economy (see `hw::power::apply_profile`).
 fn cycle_profile(rt: &Arc<AppRuntime>) {
     use crate::hw::power::{Profile, apply_profile, current_profile};
+    // Two quick presses must make two steps, not the same step twice.
+    static STEP: Mutex<()> = Mutex::new(());
     let rt = rt.clone();
     thread::spawn(move || {
+        let _step = STEP.lock().unwrap_or_else(|e| e.into_inner());
         let next = match current_profile() {
             Profile::Economy => Profile::Balanced,
             Profile::Balanced => Profile::Performance,
@@ -1015,7 +1018,8 @@ unsafe extern "system" fn wnd_proc(
                     trigger_wake_recovery(&rt_arc);
                 }
                 PBT_APMPOWERSTATUSCHANGE => {
-                    crate::presets::on_power_status_change();
+                    // Releasing smart charging talks to the firmware: never on the tray thread.
+                    thread::spawn(crate::presets::on_power_status_change);
                     thread::spawn(crate::hw::battery_alerts::on_power_status);
                     crate::hw::night_mode::poke();
                     let rt_pw = rt_arc.clone();
@@ -1106,6 +1110,16 @@ unsafe extern "system" fn wnd_proc(
                 reapply_gestures();
                 crate::footprint::trim_working_set();
             });
+            LRESULT(0)
+        }
+        // Restart Manager (setup, Windows Update) and sign-out ask through the session
+        // messages: say yes, and quit the same way as on WM_CLOSE when the session ends.
+        0x0011 /* WM_QUERYENDSESSION */ => LRESULT(1),
+        0x0016 /* WM_ENDSESSION */ if wparam.0 != 0 => {
+            rt.disposed.store(true, Ordering::Release);
+            unsafe {
+                let _ = DestroyWindow(hwnd);
+            }
             LRESULT(0)
         }
         WM_CLOSE => {

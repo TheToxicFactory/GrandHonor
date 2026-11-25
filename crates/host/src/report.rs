@@ -24,7 +24,21 @@ fn windows_build() -> String {
 pub fn log_tail(lines: usize) -> Vec<String> {
     let text = std::fs::read_to_string(crate::log::log_path()).unwrap_or_default();
     let all: Vec<&str> = text.lines().collect();
-    all[all.len().saturating_sub(lines)..].iter().map(|s| s.to_string()).collect()
+    all[all.len().saturating_sub(lines)..].iter().map(|s| private(s)).collect()
+}
+
+/// The report is meant for a public GitHub issue: the user's profile folder (it holds the
+/// account name) becomes %USERPROFILE%.
+fn private(text: &str) -> String {
+    let profile = crate::known_dirs::roaming_app_data();
+    let Some(home) = profile.parent().and_then(|p| p.parent()) else { return text.to_string() };
+    let home = home.to_string_lossy();
+    if home.is_empty() {
+        return text.to_string();
+    }
+    let mut out = text.replace(home.as_ref(), "%USERPROFILE%");
+    out = out.replace(&home.to_lowercase(), "%USERPROFILE%");
+    out
 }
 
 pub fn build() -> String {
@@ -58,11 +72,13 @@ pub fn build() -> String {
     } else {
         out.push("Devices with a problem:".into());
         for d in problems {
-            out.push(format!("  code {}: {} ({})", d.problem, d.name, d.instance_id));
+            // Only the bus and vendor/product part: the rest can be a device serial number.
+            let id: String = d.instance_id.split('\\').take(2).collect::<Vec<_>>().join("\\");
+            out.push(format!("  code {}: {} ({id})", d.problem, d.name));
         }
     }
     out.push(String::new());
-    out.push(format!("Log ({}), last {LOG_LINES} lines:", crate::log::log_path().display()));
+    out.push(format!("Log ({}), last {LOG_LINES} lines:", private(&crate::log::log_path().display().to_string())));
     out.extend(log_tail(LOG_LINES));
     out.join("\r\n")
 }

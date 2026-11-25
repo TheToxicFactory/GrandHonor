@@ -241,7 +241,23 @@ fn sanitize_relative_path(raw: &str) -> io::Result<PathBuf> {
     let mut result = PathBuf::new();
     for component in Path::new(&normalized).components() {
         match component {
-            Component::Normal(part) => result.push(part),
+            Component::Normal(part) => {
+                // Windows strips a trailing dot or space and maps CON, NUL, COM1… to devices:
+                // such names could land somewhere other than they look, so they are refused.
+                let name = part.to_string_lossy();
+                let stem = name.split('.').next().unwrap_or("").to_ascii_uppercase();
+                let reserved = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+                    || ((stem.starts_with("COM") || stem.starts_with("LPT"))
+                        && stem.len() == 4
+                        && stem.as_bytes()[3].is_ascii_digit());
+                if reserved || name.ends_with('.') || name.ends_with(' ') {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "The driver archive contains an unsafe path.",
+                    ));
+                }
+                result.push(part)
+            }
             Component::CurDir => {}
             Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
                 return Err(io::Error::new(
@@ -317,6 +333,11 @@ fn read_central_directory<R: Read + Seek>(
         ));
     }
 
+    // The central directory of a driver archive is small; a huge size from the header is
+    // refused instead of allocated.
+    if cd_size > 64 * 1024 * 1024 {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "The driver archive directory is too large."));
+    }
     reader.seek(SeekFrom::Start(cd_offset))?;
     let mut cd_buf = vec![0u8; cd_size as usize];
     reader.read_exact(&mut cd_buf)?;

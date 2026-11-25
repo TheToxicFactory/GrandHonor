@@ -1069,11 +1069,30 @@ where
         }
 
         let work_dir = prepared.parent().unwrap_or(staging);
-        let status = std::process::Command::new(&prepared)
+        let mut child = std::process::Command::new(&prepared)
             .current_dir(work_dir)
-            .status()
+            .spawn()
             .map_err(|e| e.to_string())?;
-        Ok(Some(status.code().unwrap_or(-1)))
+        // A hung installer must not keep the Drivers page busy until GrandHonor restarts:
+        // after 30 minutes stop waiting (the installer itself is left alone; a BIOS flash
+        // must never be killed).
+        let started = std::time::Instant::now();
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => return Ok(Some(status.code().unwrap_or(-1))),
+                Ok(None) if started.elapsed() > std::time::Duration::from_secs(30 * 60) => {
+                    crate::log::error(&format!("Installer of {} still running after 30 min; no longer waiting", update.component.name));
+                    return Err(t(
+                        "Установщик работает дольше 30 минут. GrandHonor больше его не ждёт; проверьте его окно.",
+                        "The installer has run for over 30 minutes. GrandHonor stopped waiting; check its window.",
+                        "安装程序已运行超过 30 分钟，GrandHonor 不再等待，请查看其窗口。",
+                    )
+                    .to_string());
+                }
+                Ok(None) => std::thread::sleep(std::time::Duration::from_millis(500)),
+                Err(e) => return Err(e.to_string()),
+            }
+        }
     })
 }
 
@@ -1588,7 +1607,8 @@ fn contains_ci(haystack: &str, needle: &str) -> bool {
 }
 
 fn starts_ci(text: &str, prefix: &str) -> bool {
-    text.len() >= prefix.len() && text[..prefix.len()].eq_ignore_ascii_case(prefix)
+    // `get` instead of slicing: a non-ASCII device id must not panic (panic = abort).
+    text.get(..prefix.len()).is_some_and(|s| s.eq_ignore_ascii_case(prefix))
 }
 
 fn is_generic_provider(d: &PnpDriver) -> bool {

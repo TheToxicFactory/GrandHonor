@@ -326,9 +326,9 @@ impl DriverPanel {
                             }
                         })),
                         Some(t(
-                            "Только от сети и при заряде от 30%. Пакет проверяется по подписи и SHA-256",
-                            "AC power and 30% charge required. Signature and SHA-256 are verified",
-                            "需接通电源且电量不低于 30%。将验证签名和 SHA-256",
+                            "Только от сети и при заряде от 30%. Перед запуском проверяется подпись HONOR",
+                            "AC power and 30% charge required. HONOR's signature is checked first",
+                            "需接通电源且电量不低于 30%。运行前校验 HONOR 签名",
                         )),
                         None,
                         Some("cta"),

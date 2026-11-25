@@ -4,7 +4,7 @@
 
 GrandHonor lives in the tray, next to the clock. **Click** the **H** icon to open the panel; click anywhere else, press `Esc` or × to close it. **Hover** the icon to see the HONOR mode and sensors, **right-click** it for a quick menu (power mode, Eye comfort, microphone, Open, Quit). Closing the panel does not stop GrandHonor — it has to keep running for the Fn keys, gestures and charge limits.
 
-Every change shows a short notice above the taskbar. Turn notices off in **System → On-screen notices**; reminders and battery notices then arrive as Windows notifications.
+Changes made with keys and from the tray show a short notice above the taskbar. Turn notices off in **System → On-screen notices**; reminders and battery notices then arrive as Windows notifications.
 
 <img src="images/osd.png" width="460" alt="On-screen notices">
 
@@ -93,7 +93,7 @@ Colour settings use HONOR's own values measured for this panel and work in every
 
 <img src="images/drivers.png" width="380" align="right" alt="Drivers tab">
 
-- **Check for driver updates** asks HONOR for drivers and BIOS for this exact laptop. Each package is verified (signature, SHA-256) before it can run; you can also save it.
+- **Check for driver updates** asks HONOR for drivers and BIOS for this exact laptop. Each package is checked before it can run: against HONOR's SHA-256 when HONOR publishes one, otherwise by HONOR's signature on its installer (the other files in such a package are not checked one by one); you can also save it.
 - **Install BIOS** works only on the charger with at least 30 % battery. Keep the laptop on: it restarts by itself.
 - **Driver backup** — **Export** saves all installed drivers to an archive, **Import** puts them back.
 - **Device check**
@@ -135,4 +135,4 @@ Colour settings use HONOR's own values measured for this panel and work in every
 
 ## Removing GrandHonor
 
-Settings → Apps → Installed apps → GrandHonor → Uninstall. The uninstaller removes the program, its startup task and the tray entry, and can also clear your settings. If HONOR OSD is still installed, it is turned back on.
+Settings → Apps → Installed apps → GrandHonor → Uninstall. The uninstaller removes the program, its startup task and the tray entry, and can also clear your settings. If HONOR OSD is still installed, it is turned back on; a camera you switched off with F8 is switched back on. GrandHonor needs an administrator account (it asks for elevation at start).

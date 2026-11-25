@@ -15,7 +15,7 @@ The charge limits, keyboard backlight and fan readings are firmware settings tha
 In the background only `GrandHonor.exe` runs, in Windows' efficiency mode, without the GPU, waiting for events. The open panel uses about 80–150 MB of memory and about 0.2 % of the CPU; once closed, it uses nothing.
 
 ### HONOR Performance or the Windows power mode?
-The **Windows power mode** (Efficiency / Balanced / Performance) is what really changes speed and fan noise. **HONOR Performance** switches the firmware profile; on the tested ZQC-P it made no measurable difference under load, because the processor is held by its own thermal limits. Both are kept and restored after sleep and restart.
+The **Windows power mode** (Efficiency / Balanced / Performance) is what really changes speed and fan noise. **HONOR Performance** switches the firmware profile; on the tested ZQC-P it made no measurable difference under load, because the processor is held by its own thermal limits. Both are kept: HONOR Performance comes back after sleep, restart or plug-in when the Windows mode is Performance.
 
 ### Where is the CPU power limit?
 It was removed: it could not hold a watt limit reliably. If an earlier version had lowered the processor setting, it is put back automatically. For a cooler, quieter laptop choose the **Quiet** processor profile, Efficiency mode or **Quiet nights**.

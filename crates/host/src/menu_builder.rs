@@ -1781,7 +1781,11 @@ fn report(msg: &str, error: bool) {
         };
         crate::osd::notify_detail(icon, title, msg);
         // With Windows notifications off the text would be lost: the panel shows it next time.
-        if let Ok(mut slot) = PANEL_NOTICE.lock() {
+        // Only errors, and only when no notification carried the text.
+        if error
+            && !settings::notifications_enabled()
+            && let Ok(mut slot) = PANEL_NOTICE.lock()
+        {
             *slot = Some((msg.to_string(), error));
         }
         return;

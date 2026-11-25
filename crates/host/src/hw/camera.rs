@@ -26,10 +26,10 @@ pub fn get_camera_off() -> Option<bool> {
 
 pub fn set_camera_off(off: bool) -> Result<(), String> {
     if get_camera_off().is_none() {
-        return Err("The HONOR camera switch is unavailable.".to_string());
+        return Err(grandhonor_core::locale::t("Переключатель камеры HONOR недоступен.", "The HONOR camera switch is unavailable.", "HONOR 摄像头开关不可用。").to_string());
     }
     settings::create_hklm_dword(SETTINGS_PATH, CAMERA_STATUS, if off { 0 } else { 1 })
-        .map_err(|e| format!("Could not write camera status ({:?})", e))
+        .map_err(|e| format!("{} ({e:?})", grandhonor_core::locale::t("Не удалось записать состояние камеры", "Could not write camera status", "无法写入摄像头状态")))
 }
 
 pub fn toggle_camera() -> Option<bool> {

@@ -241,7 +241,8 @@ fn main() -> ExitCode {
         }
         // Called by setup (possibly silent): never block it with a message box.
         CliAction::InstallPrivilegedTasks => run_action(false, scheduler::ensure_registered),
-        CliAction::UninstallPrivilegedTasks => run_action(true, || {
+        // Also called by setup, possibly silent: errors go to the log, never to a message box.
+        CliAction::UninstallPrivilegedTasks => run_action(false, || {
             // Never leave a capped processor behind after removal.
             hw::cpu_limit::restore_original();
             // Give the power scheme its own processor values back.
@@ -249,6 +250,10 @@ fn main() -> ExitCode {
             // Give HONOR its own on-screen display back if GrandHonor had replaced it.
             if hw::honor_osd::replaced() {
                 let _ = hw::honor_osd::set_replaced(false);
+            }
+            // A camera switched off with F8 would stay black without HONOR's software.
+            if hw::camera::get_camera_off() == Some(true) {
+                let _ = hw::camera::set_camera_off(false);
             }
             scheduler::remove_registered()
         }),

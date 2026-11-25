@@ -460,12 +460,37 @@ impl Panel {
         let mut items = self.snapshot.as_ref()?.items.as_slice();
         let mut selected = None;
         for name in &self.path {
-            let item = items.iter().find(|it| it.text == *name)?;
+            let item = find_page(items, name)?;
             selected = Some(item);
             items = item.children.as_deref().unwrap_or_default();
         }
         selected
     }
+}
+
+/// The item a path step names. Containers without text (a two-column row, a segment) are
+/// transparent, so a page inside one is found too; and when a heading and a page share a
+/// text (the processor profile's "Plugged in" and the preset page "Plugged in"), the page
+/// with content wins over the heading.
+fn find_page<'a>(items: &'a [ControlItem], name: &str) -> Option<&'a ControlItem> {
+    fn collect<'a>(items: &'a [ControlItem], name: &str, out: &mut Vec<&'a ControlItem>) {
+        for item in items {
+            if item.text == name {
+                out.push(item);
+            } else if item.text.is_empty()
+                && let Some(children) = item.children.as_deref()
+            {
+                collect(children, name, out);
+            }
+        }
+    }
+    let mut found = Vec::new();
+    collect(items, name, &mut found);
+    found
+        .iter()
+        .copied()
+        .find(|item| item.children.as_ref().is_some_and(|c| !c.is_empty()))
+        .or_else(|| found.first().copied())
 }
 
 fn exchange<T: DeserializeOwned>(command: u32) -> io::Result<T> {
@@ -2636,6 +2661,25 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn item(text: &str, children: Option<Vec<ControlItem>>) -> ControlItem {
+        ControlItem { text: text.into(), help: None, badge: None, command: None, selected: false, children, kind: None }
+    }
+
+    #[test]
+    fn pages_inside_rows_and_after_same_named_headings_are_found() {
+        let hour = item("From", Some(vec![item("23:00", None)]));
+        let row = item("", Some(vec![hour, item("To", Some(vec![item("07:00", None)]))]));
+        let heading = item("Plugged in", None);
+        let page = item("Plugged in", Some(vec![item("Mode", None)]));
+        let tab = vec![heading, row, page];
+        // A page inside a text-less two-column row (night hours, backlight schedule).
+        assert_eq!(find_page(&tab, "From").and_then(|p| p.children.as_ref()).map(Vec::len), Some(1));
+        // The preset page wins over the processor profile heading with the same text.
+        let found = find_page(&tab, "Plugged in").unwrap();
+        assert_eq!(found.children.as_ref().unwrap()[0].text, "Mode");
+        assert!(find_page(&tab, "Missing").is_none());
+    }
 
     #[test]
     fn slider_stops_round_to_the_nearest() {

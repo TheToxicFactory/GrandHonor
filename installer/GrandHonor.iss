@@ -83,7 +83,6 @@ Source: "{#PayloadDir}\*"; DestDir: "{app}"; Excludes: "GrandHonor.exe,GrandHono
 ; Shortcut names carry the version; the AppUserModelID matches the one GrandHonor.exe sets,
 ; so Windows ties notifications, Start search and taskbar pins to this app.
 Name: "{commonprograms}\GrandHonor {#AppVersion}"; Filename: "{app}\GrandHonor.exe"; WorkingDir: "{app}"; IconFilename: "{app}\GrandHonor.ico"; AppUserModelID: "GrandHonor.App"; Comment: "{cm:ShortcutComment}"
-Name: "{app}\GrandHonor {#AppVersion}"; Filename: "{app}\GrandHonor.exe"; WorkingDir: "{app}"; IconFilename: "{app}\GrandHonor.ico"; AppUserModelID: "GrandHonor.App"; Comment: "{cm:ShortcutComment}"
 Name: "{autodesktop}\GrandHonor {#AppVersion}"; Filename: "{app}\GrandHonor.exe"; WorkingDir: "{app}"; IconFilename: "{app}\GrandHonor.ico"; AppUserModelID: "GrandHonor.App"; Comment: "{cm:ShortcutComment}"; Tasks: desktopicon
 
 [Registry]

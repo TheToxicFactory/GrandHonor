@@ -80,7 +80,7 @@ fn apply() {
         if current != WINDOWS_EFFICIENCY {
             match set_windows_power_mode(WINDOWS_EFFICIENCY) {
                 Ok(()) => {
-                    let text = format!("{} {to:02}:00", t("Тихий режим до", "Quiet until", "安静模式至"));
+                    let text = format!("{} {to:02}:00", t("Экономия до", "Efficiency until", "能效至"));
                     crate::osd::notify(crate::osd::Icon::Normal, &text);
                 }
                 Err(err) => crate::log::error(&format!("Quiet nights: {err}")),

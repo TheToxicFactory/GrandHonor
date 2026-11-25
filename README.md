@@ -28,7 +28,7 @@ HONOR PC Manager shows ads, feels heavy and often misbehaves — yet without it 
 - **Light.** A small tray app with no GPU use while idle. Sensors are read only while you look at them.
 - **Private.** No ads, no accounts, no telemetry. It goes online only when you check for updates or drivers.
 - **Complete.** Every HONOR app can be uninstalled: GrandHonor replaces PC Manager and HONOR OSD. Keep the HONOR drivers.
-- **Safe.** Drivers and updates are verified (signature and SHA-256) before anything runs; a failed update rolls back by itself.
+- **Safe.** Drivers and updates are checked before anything runs: against HONOR's or GitHub's SHA-256 where one is published, otherwise by HONOR's signature on the installer; a failed update rolls back by itself.
 
 ## Features
 
