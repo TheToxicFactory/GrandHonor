@@ -1882,7 +1882,7 @@ dependencies = [
 
 [[package]]
 name = "grandhonor"
-version = "2.5.6"
+version = "2.6.0"
 dependencies = [
  "base64",
  "embed-resource",
@@ -1898,7 +1898,7 @@ dependencies = [
 
 [[package]]
 name = "grandhonor-core"
-version = "2.5.6"
+version = "2.6.0"
 dependencies = [
  "crc32fast",
  "flate2",
@@ -1909,7 +1909,7 @@ dependencies = [
 
 [[package]]
 name = "grandhonor-panel"
-version = "2.5.6"
+version = "2.6.0"
 dependencies = [
  "embed-resource",
  "gpui",
@@ -1923,7 +1923,7 @@ dependencies = [
 
 [[package]]
 name = "grandhonor-video"
-version = "2.5.6"
+version = "2.6.0"
 dependencies = [
  "serde_json",
  "windows",

@@ -1,10 +1,14 @@
-# GrandHonor 2.5.6
+# GrandHonor 2.6.0
 
-- **Pages that would not open:** the hours of Quiet nights and of the keyboard backlight schedule, and the Plugged in / On battery pages of Power presets, open again.
-- **HONOR Performance follows Fn+P:** it comes back after sleep, restart or plug-in only while the Windows mode is Performance, so a laptop left on Efficiency stays quiet. Fn+P no longer overwrites the choice made in the panel, and quick presses each make one step.
-- **One name per mode:** the Windows mode is Performance, the firmware mode is HONOR Performance or HONOR Standard, the processor profile is Quiet / Balanced / Fast. When HONOR Performance cannot turn on, the notice names the Windows mode first and says why.
-- **Drivers:** checks, downloads, export and import run in the background, one at a time; buttons wait while one runs; a notice says whether an install worked; an installer is waited for at most 30 minutes. Rolling back GrandHonor needs a second click.
-- **No message boxes over your game:** messages from background work become a short on-screen notice with the full text as a Windows notification.
-- **Safer:** the user's AppData folders come from the profile path Windows keeps for administrators; driver export writes without following links; archives with reserved names are refused; a non-ASCII device name no longer stops GrandHonor. Uninstalling switches a camera turned off with F8 back on and never waits on a message box.
-- **Lighter:** app profiles start only when you add a program; tray icons redraw only when the theme or accent changes; memory is returned after HONOR Performance is restored.
-- **Honest notes:** the README, guide and security notes now say exactly what is checked (HONOR's or GitHub's SHA-256 where published, otherwise HONOR's signature on the installer) and what a driver check sends to HONOR.
+- **Device check:** Drivers → Device check tests the hardware and Windows settings, lists devices with errors and their reason, restarts a device or rolls back its driver, shows NVMe health, and restarts Bluetooth or Wi-Fi.
+- **HDR and screen care:** switch HDR on the built-in display, pick a Windows HDR calibration, or turn HDR on with the charger or while a chosen program runs. Screen care sets brightness and the screen-off timeouts and can make the tray icon or a desktop shortcut monochrome.
+- **Video in Windows players:** sharpness, noise reduction, contrast and skin tone of the Intel driver, on the Display tab.
+- **Tray readings:** temperature and fan speed as tray icons, read only while they are shown and the screen is on.
+- **Touchpad:** corner presses and swipes from the edges can open GrandHonor, minimize the window or take a screenshot; drag four fingers left or right to seek in a compatible player.
+- **Power tab:** CPU, GPU, NPU and memory usage next to the sensors.
+- **Readings stay current:** battery temperature and charging power no longer blink to a dash; a reading GrandHonor could not take shows a dash instead of the saved setting.
+- **After sleep:** the laptop no longer re-applies its settings each time the screen turns on, only after real sleep or a long time with the screen off; a wake with nobody at the laptop changes nothing.
+- **Updates and rollback:** a rollback restores every file of the previous version; downloads from HONOR and GitHub check every redirect.
+- **Setup:** unticking Start with Windows on an update removes the startup task; files still in use are removed at the next restart; uninstalling leaves nothing behind.
+- **Panel:** actions that cannot run right now are shown dimmed in their place; rows that open a page no longer carry a download arrow; **GrandHonor log** is the new name of the log file button.
+- **Release files:** a list of the open-source components ships with GrandHonor, and each release has a SHA256SUMS file. The FAQ explains what to do when Smart App Control blocks the setup.
