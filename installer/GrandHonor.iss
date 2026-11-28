@@ -24,7 +24,10 @@ MinVersion=10.0.22000
 UninstallDisplayName=GrandHonor
 UninstallDisplayIcon={app}\GrandHonor.ico
 UninstallFilesDir={app}
-CloseApplications=yes
+; GrandHonor's own processes are closed by CloseRunningHost (twice: before preparing and right
+; before copying, since a browser restarts its native helpers). Restart Manager would wait for
+; these windowless helpers to answer before it forced them, which looked like a hang.
+CloseApplications=no
 CloseApplicationsFilter=*.exe
 RestartApplications=no
 Compression=lzma2/ultra64
@@ -95,6 +98,8 @@ Root: HKLM; Subkey: "Software\Microsoft\Windows\CurrentVersion\App Paths\GrandHo
 Type: files; Name: "{commonprograms}\GrandHonor*.lnk"
 Type: files; Name: "{app}\GrandHonor*.lnk"
 Type: files; Name: "{autodesktop}\GrandHonor*.lnk"
+; The Intel video layer of earlier test builds is no longer shipped.
+Type: files; Name: "{app}\GrandHonor.VideoHost.json"
 
 [Run]
 Filename: "{app}\GrandHonor.exe"; Parameters: "--install-privileged-tasks"; WorkingDir: "{app}"; Tasks: startup; StatusMsg: "{cm:StartupStatus}"; Flags: runhidden waituntilterminated
@@ -122,6 +127,15 @@ function FindWindowEx(Parent, ChildAfter: HWND; ClassName, WindowName: String): 
 
 function PostMessageWnd(Wnd: HWND; Msg: LongWord; WParam, LParam: LongInt): BOOL;
   external 'PostMessageW@user32.dll stdcall';
+
+function GetWindowProcessId(Wnd: HWND; var ProcessId: Cardinal): Cardinal;
+  external 'GetWindowThreadProcessId@user32.dll stdcall';
+function OpenWindowProcess(Access: Cardinal; Inherit: BOOL; ProcessId: Cardinal): THandle;
+  external 'OpenProcess@kernel32.dll stdcall';
+function ProcessImage(Process: THandle; Flags: Cardinal; Buffer: String; var Size: Cardinal): BOOL;
+  external 'QueryFullProcessImageNameW@kernel32.dll stdcall';
+function CloseProcessHandle(Process: THandle): BOOL;
+  external 'CloseHandle@kernel32.dll stdcall';
 
 function GetWindowsAccent(var Color: LongWord; var OpaqueBlend: LongBool): Integer;
   external 'DwmGetColorizationColor@dwmapi.dll stdcall';
@@ -205,7 +219,40 @@ begin
   Result := ExpandConstant('{commonpf64}\GrandHonor');
 end;
 
-procedure CloseRunningHost;
+function InstalledHostWindow: HWND;
+var
+  Wnd: HWND;
+  Process: THandle;
+  ProcessId, Size: Cardinal;
+  Image: String;
+begin
+  Result := 0;
+  Wnd := FindWindowEx(0, 0, 'GrandHonorHostWindow', '');
+  while Wnd <> 0 do begin
+    ProcessId := 0;
+    if (GetWindowProcessId(Wnd, ProcessId) <> 0) and (ProcessId <> 0) then begin
+      Process := OpenWindowProcess($1000, False, ProcessId);
+      if Process <> 0 then begin
+        try
+          Size := 32768;
+          SetLength(Image, Size);
+          if ProcessImage(Process, 0, Image, Size) then begin
+            SetLength(Image, Size);
+            if CompareText(Image, FixedRoot + '\GrandHonor.exe') = 0 then begin
+              Result := Wnd;
+              Exit;
+            end;
+          end;
+        finally
+          CloseProcessHandle(Process);
+        end;
+      end;
+    end;
+    Wnd := FindWindowEx(0, Wnd, 'GrandHonorHostWindow', '');
+  end;
+end;
+
+function CloseRunningHost: Boolean;
 var
   Wnd: HWND;
   Retries, Code: Integer;
@@ -213,12 +260,12 @@ var
   AppDir: String;
 begin
   Retries := 0;
-  Wnd := FindWindowEx(0, 0, 'GrandHonorHostWindow', '');
+  Wnd := InstalledHostWindow;
   WasRunning := Wnd <> 0;
   while (Wnd <> 0) and (Retries < 10) do begin
     PostMessageWnd(Wnd, WM_CLOSE, 0, 0);
     Sleep(200);
-    Wnd := FindWindowEx(0, 0, 'GrandHonorHostWindow', '');
+    Wnd := InstalledHostWindow;
     Retries := Retries + 1;
   end;
   { The window goes first; the process then saves and ends (2.5.3 and later within 5 s).
@@ -226,14 +273,16 @@ begin
     use, so whatever is left of GrandHonor is ended. }
   if WasRunning then Sleep(1500);
   // Only the copy installed here: a portable copy elsewhere keeps running.
-  { Exact folder match, quotes doubled for PowerShell; taskkill if PowerShell cannot run. }
+  { Exact folder match, quotes doubled for PowerShell. }
   AppDir := FixedRoot;
   StringChangeEx(AppDir, '''', '''''', True);
-  if not Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'), '-NoProfile -NonInteractive -Command "try { Get-Process GrandHonor,GrandHonor.Panel -ErrorAction SilentlyContinue | Where-Object { $_.Path -and ([IO.Path]::GetDirectoryName($_.Path) -eq ''' + AppDir + ''') } | Stop-Process -Force -ErrorAction Stop } catch { exit 1 }; exit 0"', '', SW_HIDE, ewWaitUntilTerminated, Code) or (Code <> 0) then begin
-    { Last resort when PowerShell cannot run or failed: by image name (also ends a portable copy). }
-    Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM GrandHonor.exe', '', SW_HIDE, ewWaitUntilTerminated, Code);
-    Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM GrandHonor.Panel.exe', '', SW_HIDE, ewWaitUntilTerminated, Code);
-  end;
+  Result := Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'), '-NoProfile -NonInteractive -Command "try { Get-Process GrandHonor,GrandHonor.Panel,GrandHonor.Video -ErrorAction SilentlyContinue | Where-Object { $_.Path -and ([IO.Path]::GetDirectoryName($_.Path) -eq ''' + AppDir + ''') } | Stop-Process -Force -ErrorAction Stop } catch { exit 1 }; exit 0"', '', SW_HIDE, ewWaitUntilTerminated, Code) and (Code = 0);
+end;
+
+function CloseFailure: String;
+begin
+  Result := Local('Не удалось закрыть установленный GrandHonor. Завершите его и повторите попытку.',
+    'Could not close the installed GrandHonor. Quit it and try again.');
 end;
 
 function InitializeSetup: Boolean;
@@ -377,7 +426,66 @@ begin
       'Only the protected Program Files\GrandHonor directory is supported.');
     Exit;
   end;
-  CloseRunningHost;
+  if not CloseRunningHost then
+    Result := CloseFailure;
+end;
+
+{ A browser starts GrandHonor.Panel and GrandHonor.Video as its native helpers, and may start
+  them again a moment after they are ended. A running program cannot be replaced but can be
+  renamed, so each one is moved aside to <name>.old before copying; the new file then goes in
+  place whatever the browser does, and the old copies are deleted afterwards (or next time). }
+procedure MoveAside(const Name: String);
+var
+  Path, Old: String;
+begin
+  Path := FixedRoot + '\' + Name;
+  Old := Path + '.old';
+  if FileExists(Old) and not DeleteFile(Old) then
+    Old := Path + '.' + GetDateTimeString('yyyymmddhhnnss', #0, #0) + '.old';
+  if FileExists(Path) and not RenameFile(Path, Old) then
+    Log('Could not move ' + Path + ' aside.');
+end;
+
+function MoveFileEx(Existing: String; NewName: Cardinal; Flags: Cardinal): Boolean;
+  external 'MoveFileExW@kernel32.dll stdcall';
+
+procedure DeleteMovedAside;
+var
+  Found: TFindRec;
+begin
+  if FindFirst(FixedRoot + '\*.old', Found) then
+  try
+    repeat
+      { Still held by a browser: Windows deletes it at the next restart (MOVEFILE_DELAY_UNTIL_REBOOT). }
+      if not DeleteFile(FixedRoot + '\' + Found.Name) then
+        if not MoveFileEx(FixedRoot + '\' + Found.Name, 0, 4) then
+          Log('Still in use, left for the next setup: ' + Found.Name);
+    until not FindNext(Found);
+  finally
+    FindClose(Found);
+  end;
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+var
+  StartupCode: Integer;
+begin
+  if CurStep = ssInstall then begin
+    if not CloseRunningHost then
+      Log('Could not close a GrandHonor process before copying files.');
+    MoveAside('GrandHonor.Panel.exe');
+    MoveAside('GrandHonor.Video.exe');
+  end else if CurStep = ssPostInstall then begin
+    { Earlier test builds registered the Intel video layer; it is no longer shipped. }
+    RegDeleteKeyIncludingSubkeys(HKCU, 'Software\Google\Chrome\NativeMessagingHosts\com.grandhonor.video');
+    RegDeleteKeyIncludingSubkeys(HKCU, 'Software\Microsoft\Edge\NativeMessagingHosts\com.grandhonor.video');
+    DeleteFile(FixedRoot + '\GrandHonor.Video.exe');
+    { Start with Windows unticked on an update or repair: remove the task an earlier setup made. }
+    if not WizardIsTaskSelected('startup') then
+      if not Exec(FixedRoot + '\GrandHonor.exe', '--uninstall-privileged-tasks', FixedRoot, SW_HIDE, ewWaitUntilTerminated, StartupCode) then
+        Log('Could not remove the GrandHonor startup task.');
+    DeleteMovedAside;
+  end;
 end;
 
 function UpdateReadyMemo(Space, NewLine, UserInfo, DirInfo, TypeInfo, ComponentsInfo, GroupInfo, TasksInfo: String): String;
@@ -508,6 +616,7 @@ begin
         DeleteFile(DataDir + '\GrandHonor.log.1');
         DeleteFile(DataDir + '\settings-backup.json');
         DeleteFile(DataDir + '\settings-before-import.json');
+        DeleteFile(ExpandConstant('{localappdata}\Temp\grandhonor-video.log'));
         RemoveDir(DataDir);
       end;
       DataDir := ExpandConstant('{userappdata}\GrandHonor');
@@ -571,7 +680,13 @@ var
   Startup: String;
 begin
   if Step = usUninstall then begin
-    CloseRunningHost;
+    { The browser's link first, so the browser does not start GrandHonor again while it closes. }
+    RegDeleteKeyIncludingSubkeys(HKCU, 'Software\Google\Chrome\NativeMessagingHosts\com.grandhonor.vsr');
+    RegDeleteKeyIncludingSubkeys(HKCU, 'Software\Microsoft\Edge\NativeMessagingHosts\com.grandhonor.vsr');
+    RegDeleteKeyIncludingSubkeys(HKCU, 'Software\Google\Chrome\NativeMessagingHosts\com.grandhonor.video');
+    RegDeleteKeyIncludingSubkeys(HKCU, 'Software\Microsoft\Edge\NativeMessagingHosts\com.grandhonor.video');
+    if not CloseRunningHost then
+      RaiseException(CloseFailure);
     if Matches('GrandHonor.exe', '{#HostHash}') or MatchesRollbackCopy then begin
       if not Exec(FixedRoot + '\GrandHonor.exe', '--uninstall-privileged-tasks', FixedRoot,
         SW_HIDE, ewWaitUntilTerminated, Code) or (Code <> 0) then
@@ -582,6 +697,15 @@ begin
       and (CompareText(Startup, '"' + FixedRoot + '\GrandHonor.exe" --background') = 0) then
       RegDeleteValue(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Run', 'GrandHonor');
     RemoveTrayIconEntries;
+    { The browser extension's link to GrandHonor (registered from the panel). }
+    RegDeleteKeyIncludingSubkeys(HKCU, 'Software\Google\Chrome\NativeMessagingHosts\com.grandhonor.vsr');
+    RegDeleteKeyIncludingSubkeys(HKCU, 'Software\Microsoft\Edge\NativeMessagingHosts\com.grandhonor.vsr');
+    DeleteFile(FixedRoot + '\GrandHonor.BrowserHost.json');
+    RegDeleteKeyIncludingSubkeys(HKCU, 'Software\Google\Chrome\NativeMessagingHosts\com.grandhonor.video');
+    RegDeleteKeyIncludingSubkeys(HKCU, 'Software\Microsoft\Edge\NativeMessagingHosts\com.grandhonor.video');
+    DeleteFile(FixedRoot + '\GrandHonor.VideoHost.json');
+    { Copies an update moved aside while the browser was running them. }
+    DeleteMovedAside;
     { The previous version kept for rollback belongs to this installation. }
     DelTree(ExpandConstant('{commonappdata}\GrandHonor\rollback'), True, True, True);
     RemoveDir(ExpandConstant('{commonappdata}\GrandHonor'));

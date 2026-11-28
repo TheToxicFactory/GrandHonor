@@ -98,8 +98,13 @@ fn svg(icon: Icon) -> &'static str {
 struct Notice {
     icon: Icon,
     text: String,
-    /// Filled and total segments of the level bar (keyboard light), if any.
-    level: Option<(u8, u8)>,
+    level: Option<Level>,
+}
+
+#[derive(Clone, Copy)]
+enum Level {
+    Steps(u8, u8),
+    Progress(f32),
 }
 
 type Fallback = std::sync::Arc<dyn Fn(&str, &str) + Send + Sync>;
@@ -136,6 +141,14 @@ pub fn notify_detail(icon: Icon, title: &str, body: &str) {
 /// Shows a notice for about 1.5 s. Non-blocking; does nothing when on-screen notices are off
 /// (used to confirm the user's own actions; background events use `notify`).
 pub fn show(icon: Icon, text: &str, level: Option<(u8, u8)>) {
+    show_notice(icon, text, level.map(|(filled, total)| Level::Steps(filled, total)));
+}
+
+pub fn show_progress(icon: Icon, text: &str, fraction: f32) {
+    show_notice(icon, text, Some(Level::Progress(fraction.clamp(0.0, 1.0))));
+}
+
+fn show_notice(icon: Icon, text: &str, level: Option<Level>) {
     if !settings::osd_enabled() {
         return;
     }
@@ -225,6 +238,7 @@ impl Drop for Frame {
 
 thread_local! {
     static FRAME: RefCell<Option<Frame>> = const { RefCell::new(None) };
+    static PROGRESS_SHADOW: RefCell<Option<(u32, Vec<u8>)>> = const { RefCell::new(None) };
 }
 
 fn blend(hwnd: HWND, frame: &Frame) {
@@ -254,14 +268,20 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
         WM_OSD_SHOW => {
             let notice = unsafe { Box::from_raw(lparam.0 as *mut Notice) };
             let was_visible = FRAME.with(|slot| slot.borrow().is_some());
+            let progress = matches!(notice.level, Some(Level::Progress(_)));
+            if !progress {
+                PROGRESS_SHADOW.with(|slot| slot.borrow_mut().take());
+            }
             if let Some(frame) = unsafe { render(&notice) } {
                 FRAME.with(|slot| *slot.borrow_mut() = Some(frame));
                 unsafe {
                     let _ = KillTimer(Some(hwnd), TIMER_HOLD);
-                    let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+                    if !was_visible || !progress {
+                        let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+                    }
                 }
-                if was_visible {
-                    // Replacing a visible notice: swap the content in place, no second entrance.
+                if was_visible || progress {
+                    // A drag follows the next input frame immediately.
                     FRAME.with(|slot| {
                         if let Some(frame) = slot.borrow().as_ref() {
                             blend(hwnd, frame);
@@ -287,6 +307,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                 }
                 // Free the bitmap: nothing is kept while the HUD is hidden.
                 FRAME.with(|slot| slot.borrow_mut().take());
+                PROGRESS_SHADOW.with(|slot| slot.borrow_mut().take());
             }
             LRESULT(0)
         }
@@ -402,7 +423,8 @@ unsafe fn render(notice: &Notice) -> Option<Frame> {
         let _ = GetMonitorInfoW(monitor, &mut info);
         let (mut dx, mut dy) = (96u32, 96u32);
         let _ = GetDpiForMonitor(monitor.0 as isize, 0, &mut dx, &mut dy);
-        let s = dx.max(96) as f32 / 96.0;
+        let dpi = dx.max(96);
+        let s = dpi as f32 / 96.0;
         let side = (BOX * s).round() as i32;
         let margin = (MARGIN * s).round() as i32;
         let full = side + 2 * margin;
@@ -428,7 +450,19 @@ unsafe fn render(notice: &Notice) -> Option<Frame> {
         let dc = CreateCompatibleDC(None);
         let old = SelectObject(dc, HGDIOBJ(bitmap.0));
         let len = (full * full * 4) as usize;
-        std::ptr::write_bytes(bits as *mut u8, 0, len);
+        let progress = matches!(notice.level, Some(Level::Progress(_)));
+        let cached = progress && PROGRESS_SHADOW.with(|slot| {
+            let slot = slot.borrow();
+            let Some((cached_dpi, pixels)) = slot.as_ref() else { return false };
+            if *cached_dpi != dpi || pixels.len() != len {
+                return false;
+            }
+            std::ptr::copy_nonoverlapping(pixels.as_ptr(), bits.cast(), len);
+            true
+        });
+        if !cached {
+            std::ptr::write_bytes(bits.cast::<u8>(), 0, len);
+        }
 
         let mut image: *mut c_void = std::ptr::null_mut();
         GdipCreateBitmapFromScan0(full, full, full * 4, PIXEL_FORMAT_32BPP_PARGB, bits, &mut image);
@@ -444,14 +478,20 @@ unsafe fn render(notice: &Notice) -> Option<Frame> {
         let radius = RADIUS * s;
 
         // 1. Drop shadow: the plate shape, lower by 8 px, blurred on the CPU.
-        let shadow = rounded_rect(m, m + 8.0 * s, f, f, radius);
-        let mut shadow_fill: *mut c_void = std::ptr::null_mut();
-        GdipCreateSolidFill(0x73_00_00_00, &mut shadow_fill);
-        GdipFillPath(g, shadow_fill, shadow);
-        GdipDeleteBrush(shadow_fill);
-        GdipDeletePath(shadow);
-        GdipFlush(g, 1);
-        blur_shadow(std::slice::from_raw_parts_mut(bits as *mut u8, len), full as usize, full as usize, (6.0 * s).round() as usize);
+        if !cached {
+            let shadow = rounded_rect(m, m + 8.0 * s, f, f, radius);
+            let mut shadow_fill: *mut c_void = std::ptr::null_mut();
+            GdipCreateSolidFill(0x73_00_00_00, &mut shadow_fill);
+            GdipFillPath(g, shadow_fill, shadow);
+            GdipDeleteBrush(shadow_fill);
+            GdipDeletePath(shadow);
+            GdipFlush(g, 1);
+            let pixels = std::slice::from_raw_parts_mut(bits.cast(), len);
+            blur_shadow(pixels, full as usize, full as usize, (6.0 * s).round() as usize);
+            if progress {
+                PROGRESS_SHADOW.with(|slot| *slot.borrow_mut() = Some((dpi, pixels.to_vec())));
+            }
+        }
 
         // 2. The plate.
         let plate = rounded_rect(m + 0.5, m + 0.5, f - 1.0, f - 1.0, radius);
@@ -512,8 +552,8 @@ unsafe fn render(notice: &Notice) -> Option<Frame> {
         GdipDeleteStringFormat(format);
         GdipDeleteFont(font);
 
-        // 6. Level bar (keyboard light, haptics): capsule segments, filled ones in full ink.
-        if let Some((filled, total)) = notice.level.filter(|(_, t)| *t > 0) {
+        // 6. Segments for hardware levels, a continuous bar for playback position.
+        if let Some(Level::Steps(filled, total)) = notice.level && total > 0 {
             let seg_w = 24.0 * s;
             let gap = 5.0 * s;
             let seg_h = 5.0 * s;
@@ -527,6 +567,23 @@ unsafe fn render(notice: &Notice) -> Option<Frame> {
                 let bar = rounded_rect(x, y, seg_w, seg_h, seg_h / 2.0);
                 GdipFillPath(g, brush, bar);
                 GdipDeletePath(bar);
+                GdipDeleteBrush(brush);
+            }
+        } else if let Some(Level::Progress(fraction)) = notice.level {
+            let width = f - 46.0 * s;
+            let x = m + (f - width) / 2.0;
+            let y = label_top + label_height + 2.0 * s;
+            let h = 5.0 * s;
+            let filled = width * fraction;
+            for (w, opacity) in [(width, 0x3D_00_00_00), (filled, 0xF2_00_00_00)] {
+                if w <= 0.0 {
+                    continue;
+                }
+                let mut brush: *mut c_void = std::ptr::null_mut();
+                GdipCreateSolidFill(opacity | ink, &mut brush);
+                let path = rounded_rect(x, y, w, h, h / 2.0);
+                GdipFillPath(g, brush, path);
+                GdipDeletePath(path);
                 GdipDeleteBrush(brush);
             }
         }

@@ -22,11 +22,8 @@ fn gate() -> &'static Mutex<()> {
 
 #[derive(Clone, Debug)]
 pub struct TooltipState {
-    pub sensor_snapshot: Option<String>,
     pub performance_mode_active: bool,
     pub hunter_mode_active: bool,
-    pub keyboard_backlight: Option<BacklightLevel>,
-    pub battery_protection: Option<BatteryMode>,
 }
 
 struct OwnedRegKey(HKEY);
@@ -68,6 +65,16 @@ fn open_user_key(write: bool) -> Option<OwnedRegKey> {
     }
 }
 
+pub fn read_hkcu_string(subkey: &str, name: &str) -> Option<String> {
+    let sub = HSTRING::from(subkey);
+    let mut handle = HKEY::default();
+    if unsafe { RegOpenKeyExW(HKEY_CURRENT_USER, &sub, Some(0), KEY_READ, &mut handle) } != ERROR_SUCCESS {
+        return None;
+    }
+    let key = OwnedRegKey(handle);
+    read_reg_string(key.0, name)
+}
+
 pub fn read_hklm_string(subkey: &str, name: &str) -> Option<String> {
     let sub = HSTRING::from(subkey);
     let mut handle = HKEY::default();
@@ -98,7 +105,7 @@ pub enum StoredValue {
 }
 
 /// Runtime state, not user choices: never exported or imported.
-const RUNTIME_VALUES: [&str; 15] = [
+const RUNTIME_VALUES: [&str; 16] = [
     // Firmware and tray state, not the user's choice: never exported or imported.
     "SmartChargeHolding",
     "BatteryProtectionMode",
@@ -106,6 +113,7 @@ const RUNTIME_VALUES: [&str; 15] = [
     "CpuProfileOriginal",
     "ProfileWriteTick",
     "AppProfileSaved",
+    "AppProfileState",
     "NightModeSavedAc",
     "FullChargeOnce",
     "BatteryWear",
@@ -239,6 +247,92 @@ pub fn display_filter() -> DisplayFilter {
         Some("comfort") => DisplayFilter::Comfort,
         _ => DisplayFilter::Off,
     }
+}
+
+pub fn hdr_policy() -> u32 {
+    read_u32("HdrPolicy").unwrap_or(0)
+}
+
+pub fn set_hdr_policy(policy: u32) {
+    write_u32("HdrPolicy", Some(policy));
+}
+
+pub fn hdr_programs() -> Vec<String> {
+    read_str("HdrPrograms").and_then(|text| serde_json::from_str(&text).ok()).unwrap_or_default()
+}
+
+pub fn set_hdr_programs(programs: &[String]) -> bool {
+    let Ok(text) = serde_json::to_string(programs) else { return false };
+    if text.len() > 256 {
+        return false;
+    }
+    write_str("HdrPrograms", Some(&text));
+    hdr_programs() == programs
+}
+
+pub fn tray_metrics() -> u32 {
+    read_u32("TrayMetrics").unwrap_or(0) & 7
+}
+
+pub fn media_seek_enabled() -> bool {
+    read_u32("MediaSeekGestures") == Some(1)
+}
+
+pub fn set_media_seek_enabled(enabled: bool) {
+    write_u32("MediaSeekGestures", Some(u32::from(enabled)));
+}
+
+/// Browser video options as bits: 1 on, 2 badge, 4 details on the badge, 8 compare (NPU),
+/// 16 NPU restoration, 32 Intel AI upscaling off, 64 frame generation off, 128|256 sharpening
+/// (0 medium, 1 off, 2 light, 3 strong), 512 frame generation up to 120 instead of 60. The
+/// browser extension reads the same key through GrandHonor's native messaging host.
+pub const BROWSER_VSR_DEFAULT: u32 = 1 | 2 | 4 | 16 | 32;
+
+pub fn browser_vsr() -> u32 {
+    read_u32("BrowserVsr").unwrap_or(BROWSER_VSR_DEFAULT) & 2047
+}
+
+/// Replaces the bits in `mask` with `value` (for choices that span several bits).
+pub fn set_browser_vsr_bits(mask: u32, value: u32) {
+    write_u32("BrowserVsr", Some((browser_vsr() & !mask) | (value & mask)));
+}
+
+pub fn toggle_browser_vsr(bit: u32) {
+    write_u32("BrowserVsr", Some(browser_vsr() ^ bit));
+}
+
+/// Writes a string value under HKCU, creating the key.
+pub fn create_hkcu_string(subkey: &str, value: &str) -> Result<(), WIN32_ERROR> {
+    let sub = HSTRING::from(subkey);
+    let mut handle = HKEY::default();
+    let status = unsafe {
+        RegCreateKeyExW(HKEY_CURRENT_USER, &sub, Some(0), None, REG_OPTION_NON_VOLATILE, KEY_READ | KEY_WRITE, None, &mut handle, None)
+    };
+    if status != ERROR_SUCCESS {
+        return Err(status);
+    }
+    let key = OwnedRegKey(handle);
+    write_reg_string(key.0, "", value)
+}
+
+pub fn automatic_update_checks() -> bool {
+    read_u32("AutomaticUpdateChecks").unwrap_or(1) != 0
+}
+
+pub fn set_automatic_update_checks(enabled: bool) {
+    write_u32("AutomaticUpdateChecks", Some(u32::from(enabled)));
+}
+
+pub fn toggle_tray_metric(metric: u32) {
+    write_u32("TrayMetrics", Some(tray_metrics() ^ metric));
+}
+
+pub fn monochrome_tray() -> bool {
+    read_u32("MonochromeTray") == Some(1)
+}
+
+pub fn set_monochrome_tray(enabled: bool) {
+    write_u32("MonochromeTray", Some(u32::from(enabled)));
 }
 
 pub fn set_display_filter(value: DisplayFilter) {
@@ -376,6 +470,15 @@ pub fn app_profile_saved() -> Option<String> {
 
 pub fn set_app_profile_saved(value: Option<&str>) {
     write_str("AppProfileSaved", value);
+}
+
+/// Source and exact applied state for recovering a running app's temporary changes.
+pub fn app_profile_state() -> Option<String> {
+    read_str("AppProfileState")
+}
+
+pub fn set_app_profile_state(value: Option<&str>) {
+    write_str("AppProfileState", value);
 }
 
 /// Per-app profiles: program file names, "game.exe|other.exe" (`hw/app_profiles.rs`).
@@ -726,32 +829,34 @@ pub mod store {
     }
 
     /// Sets (Some) or removes (None) a value. No write when nothing changes.
-    pub fn set(name: &str, value: Option<StoredValue>) {
+    pub fn set(name: &str, value: Option<StoredValue>) -> bool {
         let changed = {
             let _lock = process_lock();
             with_cache(|c| {
                 if c.values.get(name) == value.as_ref() {
-                    return false;
+                    return Some(false);
                 }
-                match &value {
-                    Some(v) => {
-                        c.values.insert(name.to_string(), v.clone());
-                    }
-                    None => {
-                        c.values.remove(name);
-                    }
-                }
+                let previous = match &value {
+                    Some(v) => c.values.insert(name.to_string(), v.clone()),
+                    None => c.values.remove(name),
+                };
                 let ok = write_file(&c.values);
                 c.stamp = stamp();
                 if !ok {
+                    match previous {
+                        Some(v) => { c.values.insert(name.to_string(), v); }
+                        None => { c.values.remove(name); }
+                    }
                     crate::log::error(&format!("Could not save setting {name}"));
+                    return None;
                 }
-                true
+                Some(true)
             })
         };
-        if changed {
+        if changed == Some(true) {
             super::mirror_to_registry(name, value.as_ref());
         }
+        changed.is_some()
     }
 }
 
@@ -786,17 +891,22 @@ pub fn cpu_profile(source: &str) -> Option<u32> {
     read_u32(&format!("CpuProfile{source}"))
 }
 
-pub fn set_cpu_profile(source: &str, value: Option<u32>) {
-    write_u32(&format!("CpuProfile{source}"), value);
-}
-
 /// The active scheme's own processor values before a profile changed them (runtime state).
 pub fn cpu_profile_original() -> Option<String> {
     read_str("CpuProfileOriginal")
 }
 
-pub fn set_cpu_profile_original(value: Option<&str>) {
-    write_str("CpuProfileOriginal", value);
+pub fn set_cpu_profile_original(value: Option<&str>) -> bool {
+    store::set("CpuProfileOriginal", value.map(|v| StoredValue::Text(v.into())))
+}
+
+/// A single setting activates linked profiles and stores both source selections.
+pub fn linked_power_profiles() -> Option<String> {
+    read_str("LinkedPowerProfiles")
+}
+
+pub fn set_linked_power_profiles(value: &str) -> bool {
+    store::set("LinkedPowerProfiles", Some(StoredValue::Text(value.into())))
 }
 
 /// Per power source presets ("Ac"/"Dc"): applied when the charger is plugged in or removed.
@@ -888,14 +998,9 @@ pub fn seed_preferred_battery_protection() {
     }
 }
 
-/// The user's choice for HONOR Performance (panel switch / Fn+P), kept across sleep, battery
-/// periods and reboots; the firmware state itself is `performance_mode_active`.
+/// The explicit HONOR switch saved by older versions before the first linked profile.
 pub fn power_unlock_preference() -> bool {
     read_u32("PowerUnlockEnabled") == Some(1)
-}
-
-pub fn set_power_unlock(enabled: Option<bool>) {
-    write_u32("PowerUnlockEnabled", enabled.map(|v| if v { 1 } else { 0 }));
 }
 
 pub fn backlight_schedule_enabled() -> bool {
@@ -962,18 +1067,12 @@ pub fn set_touchpad_edge_gesture(gesture: TouchpadEdgeGesture, enabled: Option<b
     );
 }
 
-/// The latest sensor sample lives in memory only: sampling every six seconds must not
-/// write to the registry (and so to disk).
-static SENSOR_SNAPSHOT: Mutex<Option<String>> = Mutex::new(None);
-
-pub fn set_sensor_snapshot(value: Option<&str>) {
-    if let Ok(mut slot) = SENSOR_SNAPSHOT.lock() {
-        *slot = value.map(str::to_string);
-    }
+pub fn touchpad_assignment(gesture: &str) -> Option<String> {
+    read_str(&format!("TouchpadAction.{gesture}"))
 }
 
-fn sensor_snapshot() -> Option<String> {
-    SENSOR_SNAPSHOT.lock().ok().and_then(|slot| slot.clone())
+pub fn set_touchpad_assignment(gesture: &str, action: &str) -> bool {
+    store::set(&format!("TouchpadAction.{gesture}"), Some(StoredValue::Text(action.into())))
 }
 
 /// When a GrandHonor process last wrote the HONOR profile (low 32 bits of `GetTickCount64`,
@@ -988,11 +1087,8 @@ pub fn set_profile_write_tick(tick: u32) {
 
 pub fn read_tooltip_state() -> TooltipState {
     TooltipState {
-        sensor_snapshot: sensor_snapshot(),
         performance_mode_active: read_u32("PerformanceModeActive").is_some_and(|v| v != 0),
         hunter_mode_active: read_u32("HunterModeActive").is_some_and(|v| v != 0),
-        keyboard_backlight: read_str("KeyboardBacklightLevel").and_then(|s| BacklightLevel::parse(&s)),
-        battery_protection: read_str("BatteryProtectionMode").and_then(|s| BatteryMode::parse(&s)),
     }
 }
 

@@ -8,7 +8,8 @@
 //! still puts the mode back.
 
 use super::com::{ComGuard, connect_wmi, get_prop_string, get_prop_u64};
-use crate::hw::power::{WINDOWS_BALANCED, WINDOWS_EFFICIENCY, WINDOWS_PERFORMANCE, set_windows_power_mode, windows_power_mode};
+use super::{display_hdr, power};
+use crate::hw::power::{Profile, WINDOWS_PERFORMANCE, windows_mode_for_source};
 use crate::settings;
 use grandhonor_core::locale::t;
 use std::collections::HashSet;
@@ -23,7 +24,7 @@ use windows_core::{BSTR, GUID, HRESULT, Ref, implement};
 
 const ROOT_CIMV2: &str = r"\\.\root\cimv2";
 
-/// True while a profile holds Performance (Quiet nights then stay out of the way).
+/// True while at least one program requests the Fast profile.
 static ACTIVE: AtomicBool = AtomicBool::new(false);
 
 pub fn active() -> bool {
@@ -56,8 +57,12 @@ fn name_matches(listed: &str, reported: &str) -> bool {
     listed == reported || (reported.len() >= 14 && listed.starts_with(reported))
 }
 
-fn listed(name: &str) -> bool {
-    settings::app_profiles().iter().any(|l| name_matches(l, name))
+fn watched_names() -> Vec<String> {
+    let mut names = settings::app_profiles();
+    names.extend(display_hdr::watched_programs());
+    names.sort_unstable();
+    names.dedup();
+    names
 }
 
 #[implement(IWbemObjectSink)]
@@ -125,7 +130,7 @@ pub fn settings_changed() {
 /// Starts watching when there is something to do: a chosen program, or a mode to restore
 /// after a crash mid-game.
 pub fn start_if_needed() {
-    if !settings::app_profiles().is_empty() || settings::app_profile_saved().is_some() {
+    if !watched_names().is_empty() || load().is_some() {
         start();
     }
 }
@@ -147,7 +152,8 @@ fn watch(sender: mpsc::Sender<Event>) {
     let (lock, cv) = shared();
     let mut seen = lock.lock().map(|g| *g).unwrap_or(0);
     loop {
-        if settings::app_profiles().is_empty() {
+        let names = watched_names();
+        if names.is_empty() {
             let Ok(guard) = lock.lock() else { return };
             let guard = cv.wait_while(guard, |g| *g == seen).unwrap_or_else(|e| e.into_inner());
             seen = *guard;
@@ -158,7 +164,7 @@ fn watch(sender: mpsc::Sender<Event>) {
         let subscribed = connect_wmi(ROOT_CIMV2).and_then(|services| unsafe {
             let wql = BSTR::from("WQL");
             // Filtered in WMI: the host wakes only for the chosen programs, not every process.
-            let filter = name_filter(&settings::app_profiles());
+            let filter = name_filter(&names);
             for class in ["Win32_ProcessStartTrace", "Win32_ProcessStopTrace"] {
                 let query = format!("SELECT ProcessID, ProcessName FROM {class} WHERE {filter}");
                 if let Err(err) = services.ExecNotificationQueryAsync(&wql, &BSTR::from(query.as_str()), WBEM_FLAG_SEND_STATUS, None, &sink) {
@@ -196,127 +202,158 @@ fn watch(sender: mpsc::Sender<Event>) {
 }
 
 /// Process ids of the chosen programs that run now.
-fn running_listed() -> HashSet<u32> {
-    let mut out = HashSet::new();
-    let list = settings::app_profiles();
-    if list.is_empty() {
-        return out;
+fn running_listed(power_names: &[String], hdr_names: &[String]) -> (HashSet<u32>, HashSet<u32>) {
+    let mut power_running = HashSet::new();
+    let mut hdr_running = HashSet::new();
+    if power_names.is_empty() && hdr_names.is_empty() {
+        return (power_running, hdr_running);
     }
     unsafe {
-        let Ok(snap) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) else { return out };
+        let Ok(snap) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) else {
+            return (power_running, hdr_running);
+        };
         let mut entry = PROCESSENTRY32W { dwSize: size_of::<PROCESSENTRY32W>() as u32, ..Default::default() };
         let mut ok = Process32FirstW(snap, &mut entry).is_ok();
         while ok {
             let end = entry.szExeFile.iter().position(|&c| c == 0).unwrap_or(entry.szExeFile.len());
             let name = String::from_utf16_lossy(&entry.szExeFile[..end]).to_ascii_lowercase();
-            if list.iter().any(|l| name_matches(l, &name)) {
-                out.insert(entry.th32ProcessID);
+            if power_names.iter().any(|l| l == &name) {
+                power_running.insert(entry.th32ProcessID);
+            }
+            if hdr_names.iter().any(|l| l == &name) {
+                hdr_running.insert(entry.th32ProcessID);
             }
             ok = Process32NextW(snap, &mut entry).is_ok();
         }
         let _ = CloseHandle(snap);
     }
-    out
+    (power_running, hdr_running)
 }
 
 /// What to put back when the last watched program closes.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Saved {
-    mode: GUID,
-    rate: Option<u32>,
-}
-
-fn mode_code(mode: GUID) -> u32 {
-    if mode == WINDOWS_EFFICIENCY { 1 } else if mode == WINDOWS_PERFORMANCE { 3 } else { 2 }
-}
-
-fn code_mode(code: u32) -> GUID {
-    match code {
-        1 => WINDOWS_EFFICIENCY,
-        3 => WINDOWS_PERFORMANCE,
-        _ => WINDOWS_BALANCED,
-    }
+    mode: Option<(bool, GUID)>,
+    rate: Option<(u32, u32)>,
 }
 
 fn store(saved: Option<Saved>) {
-    let text = saved.map(|s| format!("{},{}", mode_code(s.mode), s.rate.unwrap_or(0)));
-    settings::set_app_profile_saved(text.as_deref());
+    let text = saved.map(|s| {
+        let (source, mode) = s.mode.map_or((0, 0), |(ac, mode)| {
+            (if ac { 2 } else { 1 }, Profile::from_windows_mode(mode) as u32)
+        });
+        let (before, applied) = s.rate.unwrap_or_default();
+        format!("{mode},{before},{source},{applied}")
+    });
+    settings::set_app_profile_state(text.as_deref());
+    if settings::app_profile_saved().is_some() {
+        settings::set_app_profile_saved(None);
+    }
 }
 
 fn load() -> Option<Saved> {
-    let text = settings::app_profile_saved()?;
-    let (mode, rate) = text.split_once(',')?;
-    Some(Saved { mode: code_mode(mode.parse().ok()?), rate: rate.parse().ok().filter(|&r| r > 0) })
+    let text = settings::app_profile_state().or_else(settings::app_profile_saved)?;
+    let mut fields = text.split(',');
+    let profile = Profile::from_code(fields.next()?.parse().ok()?);
+    let before = fields.next()?.parse::<u32>().ok()?;
+    let source = match fields.next() {
+        Some("1") => Some(false),
+        Some("2") => Some(true),
+        _ => None,
+    };
+    let applied = fields.next().and_then(|v| v.parse::<u32>().ok()).unwrap_or(0);
+    Some(Saved {
+        // Older saves did not record the source or the applied refresh rate. Restoring
+        // those blindly could overwrite a change made by the user or on the other source.
+        mode: source.zip(profile.map(Profile::windows_mode)),
+        rate: (before > 0 && applied > 0).then_some((before, applied)),
+    })
+}
+
+pub(super) fn prior_mode(ac: bool) -> Option<GUID> {
+    let (source, mode) = load()?.mode?;
+    (source == ac && windows_mode_for_source(ac) == Some(WINDOWS_PERFORMANCE)).then_some(mode)
 }
 
 fn dispatch(events: mpsc::Receiver<Event>) {
-    let mut running: HashSet<u32> = HashSet::new();
+    let mut running = HashSet::new();
+    let mut running_hdr = HashSet::new();
+    let mut hdr_active = None;
     let mut saved = load();
-    ACTIVE.store(saved.is_some(), Ordering::Release);
     for event in events {
+        let power_names = settings::app_profiles();
+        let hdr_names = display_hdr::watched_programs();
         match event {
             Event::Started(pid, name) => {
-                if listed(&name) {
+                if power_names.iter().any(|l| name_matches(l, &name)) {
                     running.insert(pid);
+                }
+                if hdr_names.iter().any(|l| name_matches(l, &name)) {
+                    running_hdr.insert(pid);
                 }
             }
             Event::Stopped(pid) => {
                 running.remove(&pid);
+                running_hdr.remove(&pid);
             }
-            Event::Rescan => running = running_listed(),
+            Event::Rescan => (running, running_hdr) = running_listed(&power_names, &hdr_names),
         }
+        let hdr_now = !running_hdr.is_empty();
+        if hdr_active != Some(hdr_now) {
+            hdr_active = Some(hdr_now);
+            display_hdr::program_state_changed(hdr_now);
+        }
+        let changed = ACTIVE.swap(!running.is_empty(), Ordering::AcqRel) != !running.is_empty();
         match (running.is_empty(), saved) {
             (false, None) => {
                 let s = enter();
                 store(Some(s));
                 saved = Some(s);
-                ACTIVE.store(true, Ordering::Release);
             }
             (true, Some(before)) => {
                 leave(before);
                 store(None);
                 saved = None;
-                ACTIVE.store(false, Ordering::Release);
-                // Quiet nights may have been waiting for the game to end.
-                crate::hw::night_mode::poke();
             }
             _ => {}
+        }
+        if changed {
+            if let Some(applied) = power::reconcile(false) {
+                power::notify_applied(applied);
+            }
+            super::night_mode::poke();
         }
     }
 }
 
 fn enter() -> Saved {
-    let mode = windows_power_mode().unwrap_or(WINDOWS_BALANCED);
     let rates = crate::hw::display::rates();
-    if mode != WINDOWS_PERFORMANCE
-        && let Err(err) = set_windows_power_mode(WINDOWS_PERFORMANCE)
-    {
-        crate::log::error(&format!("App profile: {err}"));
-    }
+    let mode = power::begin_legacy_app_profile();
     let mut rate = None;
     if let Some((list, current)) = rates
         && let Some(&max) = list.last()
         && max != current
         && crate::hw::display::set_refresh_rate(max)
     {
-        rate = Some(current);
+        rate = Some((current, max));
     }
     crate::log::info("App profile on");
-    crate::osd::notify(
-        crate::osd::Icon::Performance,
-        t("Профиль программы: производительность", "App profile: performance", "应用配置：性能"));
+    if mode.is_some() {
+        crate::osd::notify(
+            crate::osd::Icon::Performance,
+            t("Профиль программы: производительность", "App profile: performance", "应用配置：性能"));
+    }
     Saved { mode, rate }
 }
 
 fn leave(before: Saved) {
-    if before.mode != WINDOWS_PERFORMANCE
-        && windows_power_mode() == Some(WINDOWS_PERFORMANCE)
-        && let Err(err) = set_windows_power_mode(before.mode)
-    {
-        crate::log::error(&format!("App profile restore: {err}"));
+    if let Some((source, mode)) = before.mode {
+        power::restore_legacy_app_profile(source, mode);
     }
-    if let Some(hz) = before.rate {
-        let _ = crate::hw::display::set_refresh_rate(hz);
+    if let Some((before, applied)) = before.rate
+        && crate::hw::display::current_rate() == Some(applied)
+    {
+        let _ = crate::hw::display::set_refresh_rate(before);
     }
     crate::log::info("App profile off");
 }

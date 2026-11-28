@@ -6,8 +6,8 @@ use crate::hw::camera::toggle_camera;
 use crate::hw::events::{OemEvent, OemEventWatcher, monotonic_ms};
 use crate::hw::power::can_enable_performance_mode;
 use crate::hw::touchpad::{
-    TouchpadBrightnessService, invalidate_cache as invalidate_touchpad_cache,
-    is_supported as touchpad_supported, is_supported_device_path, reapply_gestures,
+    TouchpadService, invalidate_cache as invalidate_touchpad_cache,
+    is_supported as touchpad_supported, queue_device_change, reapply_gestures, take_device_changes,
     reapply_haptics,
 };
 use crate::hw::wmi::acpi_reconnect;
@@ -66,11 +66,18 @@ const WM_APP_OPEN_PANEL: u32 = WM_APP + 2;
 const WM_APP_UPDATE_ICON: u32 = WM_APP + 3;
 const WM_APP_NOTIFY: u32 = WM_APP + 4;
 const WM_APP_QUIT: u32 = WM_APP + 5;
+const WM_APP_SENSOR_RESULT: u32 = WM_APP + 9;
 const WM_DWMCOLORIZATIONCOLORCHANGED: u32 = 0x0320;
 const TIMER_DEVICE_CHANGE: usize = 1;
 /// Retries adding the tray icon while the taskbar is not ready yet (early at sign-in).
 const TIMER_TRAY_RETRY: usize = 2;
+const TIMER_TRAY_SENSORS: usize = 3;
+const TIMER_TOOLTIP_EXPIRY: usize = 4;
+const TIMER_UPDATE_CHECK: usize = 5;
 const TRAY_RETRY_MS: u32 = 2_000;
+/// Tray readings tick once a second, like the panel's sensor grid; each tick reads only the
+/// readings that are shown and due (CPU every tick, fans every 2 s, battery every 3 s).
+const TRAY_SENSORS_MS: u32 = 1_000;
 /// Retries for about 5 minutes; after that only Explorer's TaskbarCreated adds the icon.
 const TRAY_RETRY_LIMIT: u32 = 150;
 static TRAY_RETRIES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
@@ -85,7 +92,7 @@ struct AppRuntime {
     backlight_schedule: Arc<BacklightScheduleService>,
     battery_service: Arc<BatteryProtectionService>,
     mic_mute: Arc<MicMuteService>,
-    touchpad_service: Arc<TouchpadBrightnessService>,
+    touchpad_service: Arc<TouchpadService>,
     oem_watcher: Mutex<Option<OemEventWatcher>>,
     panel: PanelHost,
     ctx: HostContext,
@@ -95,9 +102,11 @@ struct AppRuntime {
     wake_generation: AtomicU64,
     taskbar_created_msg: u32,
     power_notify: Mutex<Option<HPOWERNOTIFY>>,
+    scheme_notify: Mutex<Option<HPOWERNOTIFY>>,
     hid_notify: Mutex<Option<HDEVNOTIFY>>,
-    icon_cache: Mutex<HashMap<(i32, bool, bool), HICON>>,
+    icon_cache: Mutex<HashMap<(i32, bool, bool, bool), HICON>>,
     current_icon: Mutex<Option<HICON>>,
+    metric_icons: Mutex<crate::tray_metrics::Icons>,
 }
 
 unsafe impl Send for AppRuntime {}
@@ -113,6 +122,8 @@ fn notify_queue() -> &'static Mutex<std::collections::VecDeque<(String, String)>
 
 /// Whether HONOR Performance was allowed at the last power message (charger, 20 %).
 static PERFORMANCE_ALLOWED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+const GUID_ACTIVE_POWERSCHEME: windows_core::GUID =
+    windows_core::GUID::from_u128(0x31f9f286_5084_42fe_b720_2b0264993763);
 
 static TRAY_RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -177,9 +188,8 @@ pub fn run_tray_loop(activation_event: HANDLE, open_panel_at_start: bool) -> i32
     let backlight_schedule = Arc::new(BacklightScheduleService::start());
     let battery_service = Arc::new(BatteryProtectionService::new());
     let mic_mute = Arc::new(MicMuteService::new());
-    let touchpad_service = Arc::new(TouchpadBrightnessService::new());
+    let touchpad_service = Arc::new(TouchpadService::new(hwnd.0 as isize));
     let driver_panel = DriverPanel::default();
-    let last_sensor_ms = Arc::new(AtomicU64::new(0));
 
     let hwnd_raw = hwnd.0 as isize;
     let on_update_tray_icon: Arc<dyn Fn() + Send + Sync> = Arc::new(move || unsafe {
@@ -225,7 +235,6 @@ pub fn run_tray_loop(activation_event: HANDLE, open_panel_at_start: bool) -> i32
         on_update_tray_icon: on_update_tray_icon.clone(),
         on_notify: on_notify.clone(),
         on_quit,
-        last_sensor_ms,
     };
     crate::osd::set_fallback(on_notify.clone());
     let panel = PanelHost::new(ctx.clone());
@@ -248,9 +257,11 @@ pub fn run_tray_loop(activation_event: HANDLE, open_panel_at_start: bool) -> i32
         wake_generation: AtomicU64::new(0),
         taskbar_created_msg: taskbar_created,
         power_notify: Mutex::new(None),
+        scheme_notify: Mutex::new(None),
         hid_notify: Mutex::new(None),
         icon_cache: Mutex::new(HashMap::new()),
         current_icon: Mutex::new(None),
+        metric_icons: Mutex::new(crate::tray_metrics::Icons::default()),
     });
 
     let ptr_raw = Arc::into_raw(runtime.clone());
@@ -277,8 +288,13 @@ pub fn run_tray_loop(activation_event: HANDLE, open_panel_at_start: bool) -> i32
             }
         }
     });
+    crate::hw::power::on_changed(runtime.ctx.on_update_tray_icon.clone());
     register_notifications(&runtime);
+    sync_tray_metrics(&runtime);
+    crate::hw::display_hdr::power_state_changed();
     crate::hotkeys::register(hwnd);
+    crate::hw::touchpad::input::synchronize(hwnd);
+    sync_update_timer(hwnd);
     start_activation_listener(&runtime, activation_event);
     start_hardware_services(runtime.clone());
 
@@ -288,9 +304,7 @@ pub fn run_tray_loop(activation_event: HANDLE, open_panel_at_start: bool) -> i32
     // A fresh copy of the user's settings at every start (see settings_transfer.rs).
     let _ = std::thread::Builder::new().name("settings-backup".into()).spawn(crate::settings_transfer::refresh_backup);
     crate::hw::cpu_limit::restore_original();
-    if crate::hw::cpu_profile::chosen(true).is_some() || crate::hw::cpu_profile::chosen(false).is_some() {
-        let _ = crate::hw::cpu_profile::apply();
-    }
+    crate::hw::power::restore_legacy_cpu_at_start();
     crate::presets::start();
     let _ = std::thread::Builder::new()
         .name("startup-trim".into())
@@ -344,6 +358,7 @@ fn start_hardware_services(rt: Arc<AppRuntime>) {
     thread::Builder::new()
         .name("hw-startup".into())
         .spawn(move || {
+            crate::browser_vsr::refresh_registration();
             if rt.disposed.load(Ordering::Acquire) {
                 return;
             }
@@ -553,7 +568,7 @@ fn handle_oem_event(rt: &Arc<AppRuntime>, event: OemEvent) {
 
 /// Right-click on the tray icon: a small native menu with the switches people reach for most.
 fn show_quick_menu(rt: &Arc<AppRuntime>, hwnd: HWND) {
-    use crate::hw::power::{WINDOWS_BALANCED, WINDOWS_EFFICIENCY, WINDOWS_PERFORMANCE, windows_power_mode};
+    use crate::hw::power::{self, Profile};
     use crate::settings::DisplayFilter;
     use windows::Win32::Foundation::POINT;
     use windows::Win32::UI::WindowsAndMessaging::{
@@ -562,19 +577,14 @@ fn show_quick_menu(rt: &Arc<AppRuntime>, hwnd: HWND) {
         TrackPopupMenu,
     };
     allow_dark_menus();
-    let mode = windows_power_mode();
+    let profile = power::current_profile();
     let eye = settings::display_filter() != DisplayFilter::Off;
     let muted = rt.mic_mute.is_muted() == Some(true);
-    let modes = [
-        (1usize, WINDOWS_EFFICIENCY, t("Экономия", "Efficiency", "能效")),
-        (2, WINDOWS_BALANCED, t("Баланс", "Balanced", "平衡")),
-        (3, WINDOWS_PERFORMANCE, t("Производительность", "Performance", "性能")),
-    ];
     let chosen = unsafe {
         let Ok(menu) = CreatePopupMenu() else { return };
         let check = |on: bool| if on { MF_CHECKED } else { MF_UNCHECKED };
-        for (id, guid, label) in modes {
-            let _ = AppendMenuW(menu, MF_STRING | check(mode == Some(guid)), id, &HSTRING::from(label));
+        for item in Profile::ALL {
+            let _ = AppendMenuW(menu, MF_STRING | check(profile == item), item as usize, &HSTRING::from(item.label()));
         }
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
         let _ = AppendMenuW(menu, MF_STRING | check(eye), 10, &HSTRING::from(t("Защита зрения", "Eye comfort", "护眼")));
@@ -593,15 +603,12 @@ fn show_quick_menu(rt: &Arc<AppRuntime>, hwnd: HWND) {
     };
     match chosen {
         1..=3 => {
-            let (_, guid, label) = modes[chosen - 1];
-            match crate::hw::power::set_windows_power_mode(guid) {
-                Ok(()) => {
-                    (rt.ctx.on_update_tray_icon)();
-                    let icon = match chosen { 1 => Icon::Normal, 3 => Icon::Performance, _ => Icon::Balanced };
-                    notice(rt, icon, label, None);
+            let rt = rt.clone();
+            thread::spawn(move || {
+                if let Some(profile) = Profile::from_code(chosen as u32) {
+                    announce_power_choice(&rt, power::choose(profile));
                 }
-                Err(err) => crate::log::error(&format!("Quick menu power mode: {err}")),
-            }
+            });
         }
         10 => {
             settings::set_display_filter(if eye { DisplayFilter::Off } else { DisplayFilter::EyeComfort });
@@ -633,6 +640,25 @@ fn allow_dark_menus() {
     });
 }
 
+fn run_touchpad_action(rt: &Arc<AppRuntime>, gesture: crate::hw::touchpad::Gesture) {
+    use crate::hw::touchpad::GestureAction;
+    use windows::Win32::UI::WindowsAndMessaging::{GetDesktopWindow, GetForegroundWindow, GetShellWindow, SW_MINIMIZE, ShowWindowAsync};
+    if !gesture.is_supported() || rt.disposed.load(Ordering::Acquire) {
+        return;
+    }
+    match GestureAction::current(gesture) {
+        GestureAction::None => {}
+        GestureAction::Panel => rt.panel.toggle_or_open(true),
+        GestureAction::Screenshot => handle_oem_event(rt, OemEvent::ScreenshotKeyPressed),
+        GestureAction::Minimize => unsafe {
+            let window = GetForegroundWindow();
+            if !window.is_invalid() && window != GetDesktopWindow() && window != GetShellWindow() {
+                let _ = ShowWindowAsync(window, SW_MINIMIZE);
+            }
+        },
+    }
+}
+
 /// A remapped key (hotkeys.rs): runs its chosen action.
 fn run_key_action(rt: &Arc<AppRuntime>, key: &'static str) {
     use crate::hotkeys::Action;
@@ -659,30 +685,23 @@ fn run_key_action(rt: &Arc<AppRuntime>, key: &'static str) {
     }
 }
 
-/// Fn+P: Economy → Balanced → Performance → Economy (see `hw::power::apply_profile`).
+/// Fn+P uses the same chooser as the panel and tray.
 fn cycle_profile(rt: &Arc<AppRuntime>) {
-    use crate::hw::power::{Profile, apply_profile, current_profile};
-    // Two quick presses must make two steps, not the same step twice.
-    static STEP: Mutex<()> = Mutex::new(());
     let rt = rt.clone();
-    thread::spawn(move || {
-        let _step = STEP.lock().unwrap_or_else(|e| e.into_inner());
-        let next = match current_profile() {
-            Profile::Economy => Profile::Balanced,
-            Profile::Balanced => Profile::Performance,
-            Profile::Performance => Profile::Economy,
-        };
-        let honor_on = apply_profile(next);
-        (rt.ctx.on_update_tray_icon)();
-        let (icon, text) = match next {
-            Profile::Economy => (Icon::Normal, t("Экономия", "Efficiency", "能效")),
-            Profile::Balanced => (Icon::Balanced, t("Баланс", "Balanced", "平衡")),
-            Profile::Performance if honor_on => (Icon::Performance, t("Производительный HONOR", "HONOR Performance", "HONOR 高性能")),
-            // Say why HONOR Performance stayed off: no charger, low charge or HUNTER.
-            Profile::Performance => (Icon::Performance, crate::hw::power::performance_refusal_short()),
-        };
-        notice(&rt, icon, text, None);
-    });
+    thread::spawn(move || announce_power_choice(&rt, crate::hw::power::cycle_profile()));
+}
+
+fn announce_power_choice(rt: &Arc<AppRuntime>, result: Result<crate::hw::power::Applied, String>) {
+    match result {
+        Ok(applied) => {
+            if let Some(warning) = applied.warning() {
+                notice(rt, Icon::Warning, warning, None);
+            } else {
+                notice(rt, applied.profile.icon(), applied.profile.label(), None);
+            }
+        }
+        Err(err) => notice(rt, Icon::Warning, &err, None),
+    }
 }
 
 /// An app started using the microphone or camera. If GrandHonor has it switched off, say how
@@ -737,6 +756,10 @@ fn disable_performance_mode(rt: &Arc<AppRuntime>) {
 }
 
 fn restore_performance(rt: &Arc<AppRuntime>) {
+    if crate::hw::power::linked() {
+        let _ = crate::hw::power::reconcile(true);
+        return;
+    }
     if crate::hw::power::restore_performance_preference() {
         (rt.ctx.on_update_tray_icon)();
         // The firmware call and the icon touched pages that stay unused while hidden.
@@ -830,6 +853,14 @@ fn register_notifications(rt: &Arc<AppRuntime>) {
         {
             *guard = Some(h);
         }
+        if let Ok(h) = RegisterPowerSettingNotification(
+            HANDLE(rt.hwnd.0),
+            &GUID_ACTIVE_POWERSCHEME,
+            DEVICE_NOTIFY_WINDOW_HANDLE,
+        ) && let Ok(mut guard) = rt.scheme_notify.lock()
+        {
+            *guard = Some(h);
+        }
 
         let hid_guid = HidD_GetHidGuid();
         let filter = DEV_BROADCAST_DEVICEINTERFACE_W {
@@ -850,6 +881,11 @@ fn register_notifications(rt: &Arc<AppRuntime>) {
     }
 }
 
+/// Set by PBT_APMSUSPEND, cleared when the wake recovery runs for that sleep.
+static RECOVERY_DUE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// When the screen last turned off (monotonic ms; 0 = on).
+static DISPLAY_OFF_AT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 fn shutdown_runtime(rt: &Arc<AppRuntime>) {
     rt.disposed.store(true, Ordering::Release);
     // Quitting must never hang (setup and updates wait for this process to end): whatever a
@@ -864,12 +900,26 @@ fn shutdown_runtime(rt: &Arc<AppRuntime>) {
             let _ = SetEvent(HANDLE(rt.activation_event_raw as *mut c_void));
         }
     }
+    // Icons first: a service thread below may take until the watchdog to stop, and the tray
+    // must not keep a dead icon meanwhile.
+    delete_tray_icon(rt);
+    if let Ok(mut icons) = rt.metric_icons.lock() {
+        icons.refresh(rt.hwnd, WM_TRAY_CALLBACK, 0, false, 16);
+    }
     rt.panel.shutdown();
     cancel_wake_recovery(rt);
+    crate::hw::display_hdr::restore_on_exit();
     if let Ok(mut guard) = rt.oem_watcher.lock() {
         *guard = None;
     }
     if let Ok(mut guard) = rt.power_notify.lock()
+        && let Some(h) = guard.take()
+    {
+        unsafe {
+            let _ = UnregisterPowerSettingNotification(h);
+        }
+    }
+    if let Ok(mut guard) = rt.scheme_notify.lock()
         && let Some(h) = guard.take()
     {
         unsafe {
@@ -883,7 +933,6 @@ fn shutdown_runtime(rt: &Arc<AppRuntime>) {
             let _ = UnregisterDeviceNotification(h);
         }
     }
-    delete_tray_icon(rt);
     if let Ok(mut cache) = rt.icon_cache.lock() {
         for (_, hicon) in cache.drain() {
             unsafe {
@@ -914,11 +963,15 @@ unsafe extern "system" fn wnd_proc(
     let rt = unsafe { &*(ptr) };
     // Recover Arc clone only for helper methods needing Arc<AppRuntime>
     if msg == rt.taskbar_created_msg && rt.taskbar_created_msg != 0 {
+        if let Ok(mut icons) = rt.metric_icons.lock() {
+            icons.explorer_restarted();
+        }
         if !add_tray_icon(rt) {
             unsafe {
                 SetTimer(Some(hwnd), TIMER_TRAY_RETRY, TRAY_RETRY_MS, None);
             }
         }
+        sync_tray_metrics(rt);
         return LRESULT(0);
     }
 
@@ -936,8 +989,8 @@ unsafe extern "system" fn wnd_proc(
                     };
                     show_quick_menu(&rt_arc, hwnd);
                 }
-                WM_MOUSEMOVE => {
-                    update_tray_tooltip(rt);
+                WM_MOUSEMOVE if wparam.0 == TRAY_ICON_ID as usize => {
+                    request_tray_tooltip(rt);
                 }
                 _ => {}
             }
@@ -949,6 +1002,31 @@ unsafe extern "system" fn wnd_proc(
         }
         WM_APP_UPDATE_ICON => {
             update_tray_icon(rt);
+            sync_tray_metrics(rt);
+            sync_update_timer(hwnd);
+            LRESULT(0)
+        }
+        crate::hw::touchpad::input::WM_APP_TOUCHPAD_INPUT
+        | windows::Win32::UI::WindowsAndMessaging::WM_INPUT_DEVICE_CHANGE => {
+            crate::hw::touchpad::input::synchronize(hwnd);
+            LRESULT(0)
+        }
+        windows::Win32::UI::WindowsAndMessaging::WM_INPUT => {
+            crate::hw::touchpad::input::process(hwnd, lparam);
+            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+        }
+        WM_APP_SENSOR_RESULT => {
+            sync_tray_metrics(rt);
+            if wparam.0 != 0 && crate::tray_metrics::display_on() {
+                update_tray_tooltip(rt);
+                unsafe { let _ = SetTimer(Some(hwnd), TIMER_TOOLTIP_EXPIRY, 3_000, None); }
+            }
+            LRESULT(0)
+        }
+        windows::Win32::UI::WindowsAndMessaging::WM_DISPLAYCHANGE => {
+            crate::hw::display::topology_changed();
+            crate::hw::display_hdr::topology_changed();
+            crate::hw::display_filter::apply_saved();
             LRESULT(0)
         }
         WM_APP_NOTIFY => {
@@ -970,6 +1048,16 @@ unsafe extern "system" fn wnd_proc(
             };
             if let Some(key) = crate::hotkeys::KEYS.get(wparam.0) {
                 run_key_action(&rt_arc, key);
+            }
+            LRESULT(0)
+        }
+        crate::hw::touchpad::WM_APP_TOUCHPAD_ACTION => {
+            if let Some(gesture) = crate::hw::touchpad::Gesture::from_action_id(wparam.0) {
+                let rt_arc = unsafe {
+                    Arc::increment_strong_count(ptr);
+                    Arc::from_raw(ptr)
+                };
+                run_touchpad_action(&rt_arc, gesture);
             }
             LRESULT(0)
         }
@@ -1000,6 +1088,7 @@ unsafe extern "system" fn wnd_proc(
                 *cur = None;
             }
             update_tray_icon(rt);
+            sync_tray_metrics(rt);
             LRESULT(0)
         }
         WM_POWERBROADCAST => {
@@ -1009,38 +1098,75 @@ unsafe extern "system" fn wnd_proc(
             };
             match wparam.0 as u32 {
                 PBT_APMSUSPEND => {
+                    crate::hw::touchpad::input::reset();
+                    crate::tray_metrics::set_display_on(false);
+                    sync_tray_metrics(rt);
+                    crate::hw::power::mark_suspended();
+                    RECOVERY_DUE.store(true, Ordering::Release);
                     crate::hw::battery_alerts::on_suspend();
                     cancel_wake_recovery(&rt_arc);
                     let rt_dis = rt_arc.clone();
                     thread::spawn(move || disable_performance_mode(&rt_dis));
                 }
-                PBT_APMRESUMEAUTOMATIC | PBT_APMRESUMESUSPEND => {
+                // On Modern Standby an automatic wake (no user, screen stays off) only marks the
+                // system awake: no firmware writes while nobody is there. The full recovery runs
+                // when the user is back (resume from S3 sleep, or the screen turning on after it).
+                PBT_APMRESUMEAUTOMATIC => {
+                    crate::hw::touchpad::input::synchronize(hwnd);
+                    crate::hw::power::mark_awake();
+                }
+                PBT_APMRESUMESUSPEND => {
+                    crate::hw::touchpad::input::synchronize(hwnd);
+                    crate::hw::power::mark_awake();
+                    RECOVERY_DUE.store(false, Ordering::Release);
                     trigger_wake_recovery(&rt_arc);
                 }
                 PBT_APMPOWERSTATUSCHANGE => {
-                    // Releasing smart charging talks to the firmware: never on the tray thread.
-                    thread::spawn(crate::presets::on_power_status_change);
+                    crate::hw::display_hdr::power_state_changed();
                     thread::spawn(crate::hw::battery_alerts::on_power_status);
-                    crate::hw::night_mode::poke();
-                    let rt_pw = rt_arc.clone();
-                    // Windows sends this on every percent too. Restore the saved choice only
-                    // when HONOR Performance becomes possible again (plug-in, charge back to
-                    // 20 %), not on each message: Fn+P may have turned it off on purpose.
+                    // Windows also broadcasts battery percentage changes. Only a source
+                    // transition or an HONOR eligibility change needs the profile worker.
                     let allowed = can_enable_performance_mode().is_ok();
                     let was_allowed = PERFORMANCE_ALLOWED.swap(allowed, Ordering::AcqRel);
-                    if !allowed {
-                        thread::spawn(move || disable_performance_mode(&rt_pw));
-                    } else if !was_allowed {
-                        thread::spawn(move || restore_performance(&rt_pw));
+                    if crate::presets::source_change_pending() || allowed != was_allowed {
+                        let rt_pw = rt_arc.clone();
+                        thread::spawn(move || {
+                            let changed = crate::presets::on_power_status_change();
+                            let allowed = can_enable_performance_mode().is_ok();
+                            if !changed && was_allowed == allowed {
+                                return;
+                            }
+                            if crate::hw::power::linked() || allowed {
+                                restore_performance(&rt_pw);
+                            } else {
+                                disable_performance_mode(&rt_pw);
+                            }
+                            crate::hw::night_mode::poke();
+                        });
                     }
                 }
                 PBT_POWERSETTINGCHANGE if lparam.0 != 0 => {
                     let setting = unsafe { &*(lparam.0 as *const POWERBROADCAST_SETTING) };
-                    if setting.PowerSetting == GUID_CONSOLE_DISPLAY_STATE
-                        && setting.DataLength >= 4
-                        && setting.Data[0] == 1
+                    if setting.PowerSetting == GUID_CONSOLE_DISPLAY_STATE && setting.DataLength >= 4 {
+                        let on = setting.Data[0] != 0;
+                        crate::tray_metrics::set_display_on(on);
+                        sync_tray_metrics(rt);
+                        let now = crate::hw::events::monotonic_ms();
+                        if setting.Data[0] == 0 {
+                            DISPLAY_OFF_AT.store(now, Ordering::Release);
+                        } else if setting.Data[0] == 1 {
+                            // Full recovery only after real sleep or a long time with the screen
+                            // off; a short screen-off needs none (and would cost firmware writes).
+                            let off_at = DISPLAY_OFF_AT.swap(0, Ordering::AcqRel);
+                            let long_off = off_at != 0 && now.saturating_sub(off_at) > 60_000;
+                            if RECOVERY_DUE.swap(false, Ordering::AcqRel) || long_off {
+                                trigger_wake_recovery(&rt_arc);
+                            }
+                        }
+                    } else if setting.PowerSetting == GUID_ACTIVE_POWERSCHEME
+                        && crate::hw::power::linked()
                     {
-                        trigger_wake_recovery(&rt_arc);
+                        thread::spawn(|| crate::hw::power::reconcile(false));
                     }
                 }
                 _ => {}
@@ -1063,7 +1189,7 @@ unsafe extern "system" fn wnd_proc(
                             len += 1;
                         }
                         let path = String::from_utf16_lossy(std::slice::from_raw_parts(name_ptr, len));
-                        if is_supported_device_path(&path) {
+                        if queue_device_change(path, ev_type == DBT_DEVICEARRIVAL) {
                             let _ = KillTimer(Some(hwnd), TIMER_DEVICE_CHANGE);
                             let _ = SetTimer(Some(hwnd), TIMER_DEVICE_CHANGE, 1_000, None);
                         }
@@ -1071,6 +1197,20 @@ unsafe extern "system" fn wnd_proc(
                 }
             }
             LRESULT(1)
+        }
+        WM_TIMER if wparam.0 == TIMER_UPDATE_CHECK => {
+            crate::updater::check_automatically();
+            LRESULT(0)
+        }
+        WM_TIMER if wparam.0 == TIMER_TRAY_SENSORS => {
+            sync_tray_metrics(rt);
+            crate::tray_metrics::request(hwnd, WM_APP_SENSOR_RESULT, false);
+            LRESULT(0)
+        }
+        WM_TIMER if wparam.0 == TIMER_TOOLTIP_EXPIRY => {
+            unsafe { let _ = KillTimer(Some(hwnd), TIMER_TOOLTIP_EXPIRY); }
+            update_tray_tooltip(rt);
+            LRESULT(0)
         }
         WM_TIMER if wparam.0 == TIMER_TRAY_RETRY => {
             let rt_arc = unsafe {
@@ -1096,12 +1236,13 @@ unsafe extern "system" fn wnd_proc(
             unsafe {
                 let _ = KillTimer(Some(hwnd), TIMER_DEVICE_CHANGE);
             }
+            crate::hw::touchpad::input::synchronize(hwnd);
             let rt_arc = unsafe {
                 Arc::increment_strong_count(ptr);
                 Arc::from_raw(ptr)
             };
             thread::spawn(move || {
-                if rt_arc.disposed.load(Ordering::Acquire) {
+                if rt_arc.disposed.load(Ordering::Acquire) || !take_device_changes() {
                     return;
                 }
                 invalidate_touchpad_cache();
@@ -1137,35 +1278,63 @@ unsafe extern "system" fn wnd_proc(
     }
 }
 
-/// Hovering the icon: refresh the tooltip off the UI thread (WMI and PDH reads can take tens of
-/// milliseconds and the mouse sends many moves a second). One refresh at a time; the shown
-/// text is updated when it is ready.
-fn update_tray_tooltip(rt: &AppRuntime) {
-    static BUSY: AtomicBool = AtomicBool::new(false);
-    if BUSY.swap(true, Ordering::AcqRel) {
+fn request_tray_tooltip(rt: &AppRuntime) {
+    static LAST: AtomicU64 = AtomicU64::new(0);
+    let now = monotonic_ms().max(1);
+    let last = LAST.load(Ordering::Relaxed);
+    if last != 0 && now.saturating_sub(last) < 2_000 {
         return;
     }
-    let ctx = rt.ctx.clone();
-    let hwnd = rt.hwnd.0 as isize;
-    let spawned = thread::Builder::new().name("tray-tooltip".into()).stack_size(256 * 1024).spawn(move || {
-        crate::menu_builder::refresh_sensors_throttled(&ctx, 5_000);
-        let (tip_text, _) = crate::hw::sensors::build_telemetry(false);
-        let mut nid = NOTIFYICONDATAW {
-            cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
-            hWnd: HWND(hwnd as *mut c_void),
-            uID: TRAY_ICON_ID,
-            uFlags: NIF_TIP,
-            ..Default::default()
-        };
-        write_wide(&mut nid.szTip, &tip_text);
-        unsafe {
-            let _ = Shell_NotifyIconW(NIM_MODIFY, &nid);
-        }
-        BUSY.store(false, Ordering::Release);
-    });
-    if spawned.is_err() {
-        BUSY.store(false, Ordering::Release);
+    LAST.store(now, Ordering::Relaxed);
+    crate::tray_metrics::request(rt.hwnd, WM_APP_SENSOR_RESULT, true);
+}
+
+fn update_tray_tooltip(rt: &AppRuntime) {
+    let (text, _) = crate::hw::sensors::build_telemetry(false);
+    let mut nid = NOTIFYICONDATAW {
+        cbSize: size_of::<NOTIFYICONDATAW>() as u32,
+        hWnd: rt.hwnd,
+        uID: TRAY_ICON_ID,
+        uFlags: NIF_TIP,
+        ..Default::default()
+    };
+    write_wide(&mut nid.szTip, &text);
+    unsafe { let _ = Shell_NotifyIconW(NIM_MODIFY, &nid); }
+}
+
+fn sync_update_timer(hwnd: HWND) {
+    static ARMED: AtomicBool = AtomicBool::new(false);
+    let enabled = settings::automatic_update_checks();
+    if ARMED.load(Ordering::Relaxed) == enabled {
+        return;
     }
+    let armed = if enabled {
+        unsafe { SetTimer(Some(hwnd), TIMER_UPDATE_CHECK, crate::updater::CHECK_INTERVAL.as_millis() as u32, None) != 0 }
+    } else {
+        unsafe { let _ = KillTimer(Some(hwnd), TIMER_UPDATE_CHECK); }
+        false
+    };
+    ARMED.store(armed, Ordering::Relaxed);
+}
+
+fn sync_tray_metrics(rt: &AppRuntime) {
+    let mask = settings::tray_metrics();
+    let active = mask != 0 && crate::tray_metrics::display_on();
+    let Ok(mut icons) = rt.metric_icons.lock() else { return };
+    if mask == 0 && icons.is_empty() && !icons.timer_active {
+        return;
+    }
+    if icons.timer_active != active {
+        icons.timer_active = if active {
+            crate::tray_metrics::request(rt.hwnd, WM_APP_SENSOR_RESULT, false);
+                        unsafe { SetTimer(Some(rt.hwnd), TIMER_TRAY_SENSORS, TRAY_SENSORS_MS, None) != 0 }
+        } else {
+            unsafe { let _ = KillTimer(Some(rt.hwnd), TIMER_TRAY_SENSORS); }
+            false
+        };
+    }
+    let size = unsafe { GetSystemMetrics(SM_CXSMICON) }.clamp(16, 128);
+    icons.refresh(rt.hwnd, WM_TRAY_CALLBACK, mask, is_dark_theme(), size);
 }
 
 /// Adds (or, if Explorer still has it, refreshes) the tray icon. False when the taskbar is not
@@ -1243,7 +1412,7 @@ fn show_tray_balloon(rt: &AppRuntime, title: &str, body: &str) {
     }
 }
 
-fn write_wide(buf: &mut [u16], text: &str) {
+pub(crate) fn write_wide(buf: &mut [u16], text: &str) {
     buf.fill(0);
     let max = buf.len().saturating_sub(1);
     for (i, ch) in text.encode_utf16().take(max).enumerate() {
@@ -1320,21 +1489,23 @@ fn read_system_accent_rgb() -> (u8, u8, u8) {
 fn get_or_render_icon(rt: &AppRuntime, perf: bool) -> HICON {
     let size = unsafe { GetSystemMetrics(SM_CXSMICON) }.max(16);
     let dark = is_dark_theme();
+    let monochrome = settings::monochrome_tray();
+    let perf = perf && !monochrome;
     if let Ok(mut cache) = rt.icon_cache.lock() {
-        if let Some(&icon) = cache.get(&(size, dark, perf)) {
+        if let Some(&icon) = cache.get(&(size, dark, perf, monochrome)) {
             return icon;
         }
-        let icon = render_monochrome_icon(size, dark, perf);
-        cache.insert((size, dark, perf), icon);
+        let icon = render_tray_icon(size, dark, perf, monochrome);
+        cache.insert((size, dark, perf, monochrome), icon);
         return icon;
     }
-    render_monochrome_icon(size, dark, perf)
+    render_tray_icon(size, dark, perf, monochrome)
 }
 
 /// The GrandHonor mark for the tray: a graphite squircle (superellipse, n = 5) shaded from a
 /// lighter top to a deep bottom, a lit top rim and a strict white H with pixel-snapped stems.
 /// Same geometry as `Assets/mark.ps1` (the application icon). Performance mode draws the rim in the accent colour.
-fn render_monochrome_icon(size: i32, dark: bool, perf: bool) -> HICON {
+fn render_tray_icon(size: i32, dark: bool, perf: bool, monochrome: bool) -> HICON {
     let (acc_r, acc_g, acc_b) = read_system_accent_rgb();
     let s = size as f32;
     let half = s * 0.46;
@@ -1368,7 +1539,12 @@ fn render_monochrome_icon(size: i32, dark: bool, perf: bool) -> HICON {
                     let mut col = [58.0 + (18.0 - 58.0) * k, 58.0 + (18.0 - 58.0) * k, 63.0 + (20.0 - 63.0) * k];
                     let on_h = (y >= top && y < bottom && ((x >= left && x < left + t) || (x >= right && x < right + t)))
                         || (y >= bar_top && y < bar_top + t && x >= left && x < right + t);
-                    if on_h {
+                    if monochrome {
+                        if !on_h {
+                            continue;
+                        }
+                        col = [if dark { 208.0 } else { 53.0 }; 3];
+                    } else if on_h {
                         col = [245.0, 245.0, 247.0];
                     } else if !inside(x, y, half - rim_w) {
                         if perf {
@@ -1400,7 +1576,7 @@ fn render_monochrome_icon(size: i32, dark: bool, perf: bool) -> HICON {
     create_icon_from_bgra(size, &pixels)
 }
 
-fn create_icon_from_bgra(size: i32, bgra: &[u32]) -> HICON {
+pub(crate) fn create_icon_from_bgra(size: i32, bgra: &[u32]) -> HICON {
     unsafe {
         let bmi = BITMAPINFO {
             bmiHeader: BITMAPINFOHEADER {

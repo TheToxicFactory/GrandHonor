@@ -1917,6 +1917,18 @@ dependencies = [
  "raw-window-handle",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
+ "windows",
+]
+
+[[package]]
+name = "grandhonor-video"
+version = "2.5.6"
+dependencies = [
+ "serde_json",
+ "windows",
+ "windows-core",
+ "windows-numerics",
 ]
 
 [[package]]

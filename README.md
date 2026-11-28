@@ -25,8 +25,8 @@ Fn keys, battery care, fans and sensors, display colour and drivers — without 
 
 HONOR PC Manager shows ads, feels heavy and often misbehaves — yet without it the Fn keys, touchpad gestures and battery charge limits stop working. GrandHonor does the same job quietly and adds what the stock app is missing.
 
-- **Light.** A small tray app with no GPU use while idle. Sensors are read only while you look at them.
-- **Private.** No ads, no accounts, no telemetry. It goes online only when you check for updates or drivers.
+- **Light.** A small tray app with no GPU rendering while idle. Live readings run when you view them or enable tray readings.
+- **Private.** No ads, accounts or telemetry. Network requests are for GrandHonor update checks (including the optional hourly check), driver checks or the separate internet check.
 - **Complete.** Every HONOR app can be uninstalled: GrandHonor replaces PC Manager and HONOR OSD. Keep the HONOR drivers.
 - **Safe.** Drivers and updates are checked before anything runs: against HONOR's or GitHub's SHA-256 where one is published, otherwise by HONOR's signature on the installer; a failed update rolls back by itself.
 
@@ -34,13 +34,13 @@ HONOR PC Manager shows ads, feels heavy and often misbehaves — yet without it 
 
 | | |
 |---|---|
-| ⚡ **Power** | Live CPU and battery temperature, fans, watts and charge limit · Windows power modes, **processor profiles** for charger and battery, and HONOR Performance (`Fn+P`) · presets for charger and battery · **Quiet nights** · **App profiles** for games and heavy apps |
+| ⚡ **Power** | Live CPU, GPU, NPU and RAM usage where available · CPU and battery temperature, fans, watts and charge limit · **Quiet, Balanced and Fast** profiles for AC and battery coordinate Windows, the processor and HONOR mode (`Fn+P`) · charger presets · **Quiet nights** · **App profiles** |
 | 🔋 **Battery** | Charge limits (Home 40–70 %, Office 70–90 %, Travel) · **Smart charging** · **Charge to 100 % once** · battery health and its change over time · notices at the limit, at 20 %, when hot and after sleep |
-| 🖥 **Display** | 60 / 120 Hz · colour profiles **Vivid, sRGB, P3** · **Eye comfort** with a warmth slider, E-book and Soft modes · **Eye-break** reminders |
+| 🖥 **Display** | Built-in display refresh rate · **HDR** with AC and app rules and calibration profiles · **Vivid, sRGB, P3** colour profiles · **Eye comfort** and eye-break reminders · **Screen care** and monochrome icons |
 | ⌨️ **Keyboard** | Backlight level, auto-off and schedule · your own action for the **Copilot** and **YOYO** keys |
-| 🖱 **Touchpad** | Haptic strength · edge swipes for brightness and volume |
-| 🧰 **Drivers** | HONOR driver and BIOS updates · driver backup · **Device check**: fix devices with errors, roll back a driver, SSD health, restart Bluetooth or Wi-Fi, system report |
-| 🎛 **Everyday** | On-screen notices for every key · `F7` microphone with LED · `F8` camera · `F12` screen snip · right-click tray menu · English, Русский, 中文 |
+| 🖱 **Touchpad** | Haptic strength · edge swipes for brightness and volume · corner actions and one- or two-finger edge swipes on supported touchpads · four-finger media scrubbing in compatible players |
+| 🧰 **Drivers** | HONOR driver and BIOS updates · driver backup · **Device check**: hardware and Windows diagnostics, device repair, driver rollback, NVMe health and system report |
+| 🎛 **Everyday** | On-screen notices · `F7` microphone with LED · `F8` camera · `F12` screen snip · tray readings and right-click menu · English, Русский, 中文 |
 
 ## Screenshots
 
@@ -92,14 +92,14 @@ HONOR PC Manager shows ads, feels heavy and often misbehaves — yet without it 
 
 | Key | Action |
 |---|---|
-| `Fn+P` | Efficiency → Balanced → Performance |
+| `Fn+P` | Quiet → Balanced → Fast |
 | `F7` | Microphone on / off (all microphones, with the key's LED) |
 | `F8` | Camera on / off |
 | `F12` | Screen snip |
-| Refresh-rate key | 60 ↔ 120 Hz |
+| Refresh-rate key | 60 Hz (or the lowest available rate) ↔ highest available rate on the built-in screen |
 | Copilot, YOYO (`F11`) | Your choice in **Keyboard → Keys** |
 
-**Updates:** System → Check for updates installs a new version from GitHub; if anything fails, the previous one comes back. **Uninstall:** Settings → Apps → Installed apps → GrandHonor.
+To update GrandHonor, open **System → Check for GrandHonor updates** and choose **Install version** when one is available. If installation fails, the previous version comes back. To remove GrandHonor, open **Settings → Apps → Installed apps → GrandHonor**.
 
 ## Help
 

@@ -231,20 +231,50 @@ pub fn get_text(url_str: &str, timeout_ms: i32) -> Result<HttpResponseData, Stri
     with_retries("GET", || get_text_once(url_str, timeout_ms))
 }
 
-fn get_text_once(url_str: &str, timeout_ms: i32) -> Result<HttpResponseData, String> {
+/// An explicit connectivity test, with one fixed HTTPS destination and no redirects or retries.
+pub(crate) fn probe_internet() -> Result<(), String> {
+    let url = Url::parse("https://www.microsoft.com/").map_err(|error| error.to_string())?;
+    let session = open_session(1_500)?;
+    let (_connection, request) = open_request(&session, "HEAD", &url, true)?;
+    unsafe {
+        WinHttpSendRequest(request.0, None, None, 0, 0, 0).map_err(|error| error.to_string())?;
+        WinHttpReceiveResponse(request.0, std::ptr::null_mut()).map_err(|error| error.to_string())?;
+    }
+    let status = query_status_code(&request)?;
+    if (200..400).contains(&status) {
+        Ok(())
+    } else {
+        Err(format!("HTTP {status}"))
+    }
+}
+
+pub(crate) fn get_text_once(url_str: &str, timeout_ms: i32) -> Result<HttpResponseData, String> {
     let url = Url::parse(url_str).map_err(|e| e.to_string())?;
     let session = open_session(timeout_ms)?;
-    let (_conn, req) = open_request(&session, "GET", &url, false)?;
-    unsafe {
-        WinHttpSendRequest(req.0, None, None, 0, 0, 0)
-            .map_err(|e| format!("WinHttpSendRequest failed: {e}"))?;
-        WinHttpReceiveResponse(req.0, std::ptr::null_mut())
-            .map_err(|e| format!("WinHttpReceiveResponse failed: {e}"))?;
+    let mut current = url;
+    // Redirects are followed by hand, at most MAX_REDIRECTS, each checked against the HONOR or
+    // GitHub rules: WinHTTP's own redirect handling does not check the destination host.
+    for _ in 0..=MAX_REDIRECTS {
+        let (_conn, req) = open_request(&session, "GET", &current, true)?;
+        unsafe {
+            WinHttpSendRequest(req.0, None, None, 0, 0, 0)
+                .map_err(|e| format!("WinHttpSendRequest failed: {e}"))?;
+            WinHttpReceiveResponse(req.0, std::ptr::null_mut())
+                .map_err(|e| format!("WinHttpReceiveResponse failed: {e}"))?;
+        }
+        let status = query_status_code(&req)?;
+        if matches!(status, 301 | 302 | 303 | 307 | 308) {
+            let location = query_location_header(&req).ok_or("The server redirected without a Location header.")?;
+            current = validate_redirect_url(&current, &location)
+                .or_else(|| grandhonor_core::url_guard::validate_update_redirect(&current, &location))
+                .ok_or("The server redirected outside the trusted HTTPS sources.")?;
+            continue;
+        }
+        let rate_limit_reset = query_custom_header(&req, "X-RateLimit-Reset").and_then(|v| v.parse().ok());
+        let body = read_all_bytes(&req, 32 * 1024 * 1024)?;
+        return Ok(HttpResponseData { status, body, rate_limit_reset });
     }
-    let status = query_status_code(&req)?;
-    let rate_limit_reset = query_custom_header(&req, "X-RateLimit-Reset").and_then(|v| v.parse().ok());
-    let body = read_all_bytes(&req, 32 * 1024 * 1024)?;
-    Ok(HttpResponseData { status, body, rate_limit_reset })
+    Err("Too many redirects.".to_string())
 }
 
 pub fn post_json(url_str: &str, json_body: &[u8], timeout_ms: i32) -> Result<HttpResponseData, String> {
@@ -254,7 +284,8 @@ pub fn post_json(url_str: &str, json_body: &[u8], timeout_ms: i32) -> Result<Htt
 fn post_json_once(url_str: &str, json_body: &[u8], timeout_ms: i32) -> Result<HttpResponseData, String> {
     let url = Url::parse(url_str).map_err(|e| e.to_string())?;
     let session = open_session(timeout_ms)?;
-    let (_conn, req) = open_request(&session, "POST", &url, false)?;
+    // No redirects for POST: the body carries device details and must reach only this host.
+    let (_conn, req) = open_request(&session, "POST", &url, true)?;
     let headers: Vec<u16> = "Content-Type: application/json; charset=utf-8\r\n"
         .encode_utf16()
         .collect();

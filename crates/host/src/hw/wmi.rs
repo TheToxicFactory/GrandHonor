@@ -398,12 +398,14 @@ pub fn read_battery_power_watts() -> Option<f64> {
 }
 
 static BRIGHTNESS_GATE: OnceLock<Mutex<()>> = OnceLock::new();
+static DISPLAY_BRIGHTNESS: crate::cache::Ttl<Option<u32>> = crate::cache::Ttl::new(Duration::from_secs(3));
 
 pub fn change_wmi_brightness(delta: i32) -> i32 {
     let gate = BRIGHTNESS_GATE.get_or_init(|| Mutex::new(()));
     let Ok(_g) = gate.lock() else { return -1 };
     let _com = ComGuard::mta();
-    match change_wmi_brightness_core(|current| (current + delta).clamp(0, 100) as u32) {
+    DISPLAY_BRIGHTNESS.clear();
+    match change_wmi_brightness_core(BrightnessTarget::Relative(delta)) {
         Ok(target) => target,
         Err(err) => {
             crate::log::error(&format!("WmiSetBrightness failed: {err}"));
@@ -417,7 +419,8 @@ pub fn set_wmi_brightness(percent: u32) -> bool {
     let gate = BRIGHTNESS_GATE.get_or_init(|| Mutex::new(()));
     let Ok(_g) = gate.lock() else { return false };
     let _com = ComGuard::mta();
-    match change_wmi_brightness_core(|_| percent.min(100)) {
+    DISPLAY_BRIGHTNESS.clear();
+    match change_wmi_brightness_core(BrightnessTarget::Absolute(percent.min(100))) {
         Ok(target) => target >= 0,
         Err(err) => {
             crate::log::error(&format!("WmiSetBrightness failed: {err}"));
@@ -426,18 +429,40 @@ pub fn set_wmi_brightness(percent: u32) -> bool {
     }
 }
 
-fn change_wmi_brightness_core(target_for: impl Fn(i32) -> u32) -> Result<i32, String> {
+pub fn display_brightness() -> Option<u32> {
+    DISPLAY_BRIGHTNESS.get(read_brightness)
+}
+
+fn read_brightness() -> Option<u32> {
+    let _com = ComGuard::mta();
+    let services = connect_wmi(ROOT_WMI).ok()?;
+    let displays = wmi_query(&services, "SELECT CurrentBrightness FROM WmiMonitorBrightness WHERE Active=True").ok()?;
+    let value = get_prop_u64(displays.first()?, "CurrentBrightness")?;
+    (value <= 100).then_some(value as u32)
+}
+
+enum BrightnessTarget {
+    Absolute(u32),
+    Relative(i32),
+}
+
+fn change_wmi_brightness_core(target: BrightnessTarget) -> Result<i32, String> {
     let services = connect_wmi(ROOT_WMI).map_err(|e| e.to_string())?;
-    let brightness_objs = wmi_query(
-        &services,
-        "SELECT CurrentBrightness FROM WmiMonitorBrightness WHERE Active=True",
-    )
-    .map_err(|e| e.to_string())?;
-    let Some(brightness_obj) = brightness_objs.into_iter().next() else {
-        return Ok(-1);
+    let target = match target {
+        BrightnessTarget::Absolute(percent) => percent,
+        BrightnessTarget::Relative(delta) => {
+            let displays = wmi_query(
+                &services,
+                "SELECT CurrentBrightness FROM WmiMonitorBrightness WHERE Active=True",
+            )
+            .map_err(|err| err.to_string())?;
+            let Some(display) = displays.first() else {
+                return Ok(-1);
+            };
+            let current = get_prop_u64(display, "CurrentBrightness").unwrap_or(50) as i32;
+            (current + delta).clamp(0, 100) as u32
+        }
     };
-    let current = get_prop_u64(&brightness_obj, "CurrentBrightness").unwrap_or(50) as i32;
-    let target = target_for(current);
 
     let method_objs = wmi_query(
         &services,

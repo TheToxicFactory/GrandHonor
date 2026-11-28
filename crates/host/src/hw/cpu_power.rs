@@ -4,7 +4,7 @@
 
 use std::sync::Mutex;
 use windows::Win32::System::Performance::{
-    PDH_FMT_COUNTERVALUE, PDH_FMT_DOUBLE, PdhAddEnglishCounterW, PdhCollectQueryData,
+    PDH_FMT_COUNTERVALUE, PDH_FMT_DOUBLE, PdhAddEnglishCounterW, PdhCloseQuery, PdhCollectQueryData,
     PdhGetFormattedCounterValue, PdhOpenQueryW,
 };
 use windows_core::w;
@@ -27,6 +27,7 @@ fn open() -> Result<Query, ()> {
         }
         let mut counter = Default::default();
         if PdhAddEnglishCounterW(query, w!(r"\Energy Meter(rapl_package0_pkg)\Power"), 0, &mut counter) != 0 {
+            let _ = PdhCloseQuery(query);
             return Err(());
         }
         let _ = PdhCollectQueryData(query);

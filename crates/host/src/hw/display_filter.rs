@@ -227,7 +227,11 @@ fn run(rx: Receiver<Msg>) {
         let _ = msg.map(|Msg::Apply| ());
         let filter = settings::display_filter();
         let (hour, minutes_left) = local_hour_and_minutes_left();
-        let m = combine(matrix(filter, settings::eye_warmth(), hour), profile_matrix(settings::color_profile()));
+        let suspended = super::display_hdr::any_hdr_active();
+        let m = (!suspended).then(|| {
+            let profile = super::display::built_in_only().then(|| profile_matrix(settings::color_profile())).flatten();
+            combine(matrix(filter, settings::eye_warmth(), hour), profile)
+        }).flatten();
         if m.is_some() && !initialized {
             initialized = unsafe { MagInitialize() }.as_bool();
             if !initialized {
@@ -249,7 +253,7 @@ fn run(rx: Receiver<Msg>) {
             }
         }
         // E-book follows the time of day: wake at the next 6-hour band, otherwise sleep.
-        wait = (filter == DisplayFilter::Ebook).then(|| Duration::from_secs(u64::from(minutes_left) * 60));
+        wait = (!suspended && filter == DisplayFilter::Ebook).then(|| Duration::from_secs(u64::from(minutes_left) * 60));
     }
 }
 

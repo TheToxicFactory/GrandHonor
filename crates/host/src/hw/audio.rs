@@ -8,12 +8,25 @@ use windows::Win32::Media::Audio::Endpoints::{
 };
 use windows::Win32::Media::Audio::{
     AUDIO_VOLUME_NOTIFICATION_DATA, DEVICE_STATE_ACTIVE, IMMDeviceEnumerator, MMDeviceEnumerator,
-    eCapture, eConsole,
+    eCapture, eConsole, eRender,
 };
 use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance, CoTaskMemFree};
 use windows_core::{GUID, implement};
 
 const E_NOTFOUND_HRESULT: i32 = -2147023728i32; // 0x80070490
+
+/// One Windows volume step on the current default playback device.
+pub fn step_output_volume(up: bool) -> bool {
+    let _com = ComGuard::mta();
+    let volume = unsafe {
+        CoCreateInstance::<_, IMMDeviceEnumerator>(&MMDeviceEnumerator, None, CLSCTX_INPROC_SERVER)
+            .and_then(|enumerator| enumerator.GetDefaultAudioEndpoint(eRender, eConsole))
+            .and_then(|device| device.Activate::<IAudioEndpointVolume>(CLSCTX_INPROC_SERVER, None))
+    };
+    volume.is_ok_and(|volume| unsafe {
+        if up { volume.VolumeStepUp(&GUID::zeroed()) } else { volume.VolumeStepDown(&GUID::zeroed()) }
+    }.is_ok())
+}
 
 #[implement(IAudioEndpointVolumeCallback)]
 struct VolumeCallback {

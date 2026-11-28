@@ -255,6 +255,14 @@ pub struct TelemetrySummary {
     /// Charger power agreed over USB-C PD (volts × amps of the contract), when one is connected.
     #[serde(default)]
     pub charger_watts: Option<u32>,
+    #[serde(default)]
+    pub cpu_load: Option<u8>,
+    #[serde(default)]
+    pub gpu_load: Option<u8>,
+    #[serde(default)]
+    pub npu_load: Option<u8>,
+    #[serde(default)]
+    pub ram_load: Option<u8>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -268,6 +276,9 @@ pub struct ControlItem {
     pub selected: bool,
     pub children: Option<Vec<ControlItem>>,
     pub kind: Option<String>,
+    /// An action that cannot run right now: shown dimmed in its own place, not as a heading.
+    #[serde(default)]
+    pub disabled: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

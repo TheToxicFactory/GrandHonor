@@ -55,27 +55,35 @@ pub fn build() -> String {
     }
     if let Some(s) = crate::hw::storage::read() {
         out.push(format!(
-            "SSD: {}, {}% used, {}% spare, {} °C, {:.1} TB written, {} h, {} media errors{}",
+            "SSD: {}, {}% used, {}% spare, {}, {:.1} TB written, {} h, {} media errors{}",
             s.model,
             s.used_percent,
             s.spare_percent,
-            s.temperature_c,
+            s.temperature_c.map_or_else(|| "temperature unavailable".to_string(), |temperature| format!("{temperature} °C")),
             s.written_tb,
             s.power_on_hours,
             s.media_errors,
             if s.warning { ", CRITICAL WARNING" } else { "" }
         ));
     }
-    let problems = crate::hw::devices::problems();
-    if problems.is_empty() {
-        out.push("Devices: no problems".into());
-    } else {
-        out.push("Devices with a problem:".into());
-        for d in problems {
-            // Only the bus and vendor/product part: the rest can be a device serial number.
-            let id: String = d.instance_id.split('\\').take(2).collect::<Vec<_>>().join("\\");
-            out.push(format!("  code {}: {} ({id})", d.problem, d.name));
+    match crate::hw::devices::problems() {
+        Ok((problems, complete)) => {
+            if !complete {
+                out.push("Devices: status incomplete".into());
+            }
+            if problems.is_empty() && complete {
+                out.push("Devices: Windows reported no problems".into());
+            }
+            if !problems.is_empty() {
+                out.push("Devices with a problem:".into());
+                for d in problems {
+                    // Only the bus and vendor/product part: the rest can be a device serial number.
+                    let id: String = d.instance_id.split('\\').take(2).collect::<Vec<_>>().join("\\");
+                    out.push(format!("  code {}: {} ({id})", d.problem, d.name));
+                }
+            }
         }
+        Err(_) => out.push("Devices: status unavailable".into()),
     }
     out.push(String::new());
     out.push(format!("Log ({}), last {LOG_LINES} lines:", private(&crate::log::log_path().display().to_string())));

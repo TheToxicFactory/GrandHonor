@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod browser_vsr;
 mod cache;
 mod drivers;
 mod footprint;
@@ -17,6 +18,7 @@ mod settings;
 mod safe_fs;
 mod settings_transfer;
 mod tray;
+mod tray_metrics;
 mod unelevated;
 mod updater;
 mod verify;
@@ -189,6 +191,11 @@ fn parse_bool(s: &str) -> Option<bool> {
 }
 
 fn main() -> ExitCode {
+    // The release profile aborts on panic; leave the place and message in GrandHonor.log first.
+    std::panic::set_hook(Box::new(|info| {
+        let thread = std::thread::current();
+        crate::log::error(&format!("panic in thread {}: {info}", thread.name().unwrap_or("unnamed")));
+    }));
     unsafe {
         let _ = SetCurrentProcessExplicitAppUserModelID(&HSTRING::from("GrandHonor.App"));
     }

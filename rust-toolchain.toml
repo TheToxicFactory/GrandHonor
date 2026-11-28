@@ -1,0 +1,4 @@
+# The toolchain the release is built and tested with (CI and local builds alike).
+[toolchain]
+channel = "1.100.0"
+profile = "minimal"

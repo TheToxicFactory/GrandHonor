@@ -1,5 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod browser_link;
+mod shortcut_icon;
+
 use gpui::{
     Animation, AnimationExt, AnyElement, App, Application, Bounds, Context, Div, ElementId,
     FocusHandle, Font, FontFallbacks, FontFeatures, FontStyle, FontWeight,
@@ -170,22 +173,20 @@ struct Panel {
     /// True while the pointer holds the knob; afterwards `slider_drag` keeps the released
     /// stop until the host's next snapshot shows it, so the knob does not jump back.
     slider_active: bool,
-    /// Track bounds from the last paint and the stop commands of the slider being dragged.
+    /// Track bounds from the last paint.
     slider_bounds: std::rc::Rc<std::cell::Cell<Option<Bounds<gpui::Pixels>>>>,
-    /// Stop commands of the slider in the latest snapshot (filled while rendering).
-    slider_commands: std::rc::Rc<std::cell::RefCell<Vec<Option<u32>>>>,
     /// Scroll position of every page, so "Back" returns to where you were.
     scroll: HashMap<String, gpui::ScrollHandle>,
 }
 
 /// A command waiting for the host to be free.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 enum Pending {
     /// A control's command from the snapshot of this generation (ids change between snapshots,
     /// so it is dropped when a newer snapshot arrived first).
     Command { id: u32, generation: u64 },
     /// A slider stop, resolved against the newest snapshot when it is sent.
-    Stop(usize),
+    Stop { stop: usize, page: Vec<String> },
 }
 
 enum Reply {
@@ -235,7 +236,7 @@ impl Panel {
     }
 
     fn slider_apply(&mut self, fraction: f32, cx: &mut Context<Self>) {
-        let count = self.slider_commands.borrow().len();
+        let count = self.slider_stops().len();
         let stop = slider_stop(fraction, count);
         if self.slider_sent != Some(stop as u32) {
             self.slider_sent = Some(stop as u32);
@@ -247,12 +248,9 @@ impl Panel {
     /// looked up in the newest snapshot when it is sent.
     fn request_stop(&mut self, stop: usize, cx: &mut Context<Self>) {
         if self.busy || self.polling {
-            self.pending_command = Some(Pending::Stop(stop));
-        } else {
-            let cmd = self.slider_commands.borrow().get(stop).copied().flatten();
-            if let Some(cmd) = cmd {
-                self.request(cmd, cx);
-            }
+            self.pending_command = Some(Pending::Stop { stop, page: self.path.clone() });
+        } else if let Some(command) = self.slider_stops().get(stop).and_then(|item| item.command) {
+            self.request(command, cx);
         }
     }
 
@@ -263,9 +261,11 @@ impl Panel {
             return;
         }
         if let Some(fraction) = self.slider_drag {
-            let count = self.slider_commands.borrow().len().max(2);
-            self.slider_drag = Some(slider_stop(fraction, count) as f32 / (count - 1) as f32);
-            self.slider_apply(fraction, cx);
+            let count = self.slider_stops().len();
+            self.slider_drag = (count >= 2).then(|| slider_stop(fraction, count) as f32 / (count - 1) as f32);
+            if self.slider_drag.is_some() {
+                self.slider_apply(fraction, cx);
+            }
         }
         self.slider_sent = None;
         if !self.busy && !self.polling && self.pending_command.is_none() {
@@ -441,7 +441,8 @@ impl Panel {
                 match panel.pending_command.take() {
                     Some(Pending::Command { id, generation }) if generation == panel.generation => panel.request(id, cx),
                     Some(Pending::Command { .. }) => {} // the page changed under it
-                    Some(Pending::Stop(stop)) => panel.request_stop(stop, cx),
+                    Some(Pending::Stop { stop, page }) if page == panel.path => panel.request_stop(stop, cx),
+                    Some(Pending::Stop { .. }) => {}
                     None => {}
                 }
                 cx.notify();
@@ -465,6 +466,14 @@ impl Panel {
             items = item.children.as_deref().unwrap_or_default();
         }
         selected
+    }
+
+    fn slider_stops(&self) -> &[ControlItem] {
+        self.selected()
+            .and_then(|page| page.children.as_deref())
+            .and_then(|items| items.iter().find(|item| item.kind.as_deref() == Some("slider")))
+            .and_then(|slider| slider.children.as_deref())
+            .unwrap_or_default()
     }
 }
 
@@ -737,7 +746,7 @@ fn section_symbol(kind: Option<&str>) -> &'static str {
         Some("battery") => "\u{e945}",
         Some("keyboard") => "\u{e765}",
         Some("touchpad") => "\u{efa5}",
-        Some("drivers" | "driver-update" | "driver" | "collection") => "\u{e896}",
+        Some("drivers" | "driver-update" | "driver") => "\u{e896}",
         Some("settings") => "\u{e713}",
         Some("display") => "\u{e7f4}",
         Some("time") => "\u{e823}",
@@ -884,7 +893,6 @@ struct Ctx<'a> {
     /// Knob position of a slider being dragged.
     slider_drag: Option<f32>,
     slider_bounds: std::rc::Rc<std::cell::Cell<Option<Bounds<gpui::Pixels>>>>,
-    slider_commands: std::rc::Rc<std::cell::RefCell<Vec<Option<u32>>>>,
     /// The command being run (its control alone shows the busy state).
     busy_command: Option<u32>,
     /// Monotonic snapshot number: part of animated element ids, so a change restarts them.
@@ -987,7 +995,6 @@ impl Render for Panel {
             motion: &self.motion,
             slider_drag: self.slider_drag,
             slider_bounds: self.slider_bounds.clone(),
-            slider_commands: self.slider_commands.clone(),
             busy_command: self.busy_command.filter(|_| self.busy),
             generation: self.generation,
         };
@@ -1047,12 +1054,11 @@ impl Render for Panel {
                     .flex_none()
                     .items_center()
                     .justify_center()
-                    .size(px(28.))
-                    .rounded_full()
-                    .bg(rgba(palette.seg_track))
+                    .size(px(32.))
+                    .rounded(px(8.))
                     .text_color(rgba(palette.muted))
-                    .hover(move |el| el.bg(rgba(palette.elevated)).text_color(rgba(palette.text)))
-                    .child(glyph("\u{e8bb}", 9.)),
+                    .hover(move |el| el.bg(rgba(palette.hover)).text_color(rgba(palette.text)))
+                    .child(glyph("\u{e8bb}", 12.)),
             );
 
         // Tab bar: equal segments with a pill that slides to the chosen one.
@@ -1384,6 +1390,7 @@ fn row_role(item: &ControlItem) -> Role {
         Some("group-grid" | "row-2" | "segment" | "slider" | "grid-hours" | "cta" | "primary" | "banner") => Role::Block,
         _ if item.children.is_none()
             && item.command.is_none()
+            && !item.disabled
             && !matches!(kind, Some("driver" | "driver-update" | "switch")) =>
         {
             Role::Header
@@ -1428,7 +1435,8 @@ fn render_group(rows: &[(usize, &ControlItem)], prefix: &str, ctx: &Ctx, cx: &Co
 }
 
 fn leading_icon(item: &ControlItem) -> bool {
-    matches!(item.kind.as_deref(), Some("driver" | "driver-update" | "collection"))
+    // Sub-page rows ("collection") take no leading icon: a download arrow there read as an action.
+    matches!(item.kind.as_deref(), Some("driver" | "driver-update"))
 }
 
 fn render_switch(on: bool, animate: bool, id: SharedString, palette: Palette) -> AnyElement {
@@ -1492,7 +1500,7 @@ fn render_row(item: &ControlItem, index: usize, prefix: &str, ctx: &Ctx, cx: &Co
     let interactive = nested || (action.is_some() && !ctx.busy);
     // A switch or action without a command is unavailable (for example in the portable copy):
     // it looks dimmed instead of working-but-dead.
-    let unavailable = !nested && action.is_none() && matches!(kind, Some("switch" | "card" | "danger"));
+    let unavailable = !nested && action.is_none() && (item.disabled || matches!(kind, Some("switch" | "card" | "danger")));
     let row = if interactive {
         control(id, palette, move |_, cx| {
             let _ = entity.update(cx, |p, cx| {
@@ -1908,14 +1916,11 @@ fn render_slider(container: &ControlItem, base_idx: usize, ctx: &Ctx, cx: &Conte
     let children = container.children.as_deref().unwrap_or(&[]);
     let count = children.len().max(2);
     let selected = children.iter().position(|c| c.selected).unwrap_or(0);
-    let commands: Vec<Option<u32>> = children.iter().map(|c| c.command).collect();
     let dragging = ctx.slider_drag.is_some();
     let fill = ctx.slider_drag.unwrap_or(selected as f32 / (count - 1) as f32);
     let knob = if dragging { 20.0 } else { 18.0 };
     let enabled = !ctx.busy || dragging;
 
-    // The newest snapshot's stops, used when a queued stop is finally sent.
-    *ctx.slider_commands.borrow_mut() = commands.clone();
     let bounds_cell = ctx.slider_bounds.clone();
     let measure = gpui::canvas(move |bounds, _, _| bounds_cell.set(Some(bounds)), |_, _, _, _| {})
         .absolute()
@@ -2143,6 +2148,19 @@ fn telemetry_overview(telemetry: &TelemetrySummary, disconnected: bool, palette:
         .child(divider())
         .child(cell(t("Лимит заряда", "Charge limit", "充电上限"), charge, "", None));
 
+    let mut load_row = div().flex();
+    for (index, (label, value)) in [
+        (t("ЦП", "CPU", "CPU"), telemetry.cpu_load),
+        (t("ГП", "GPU", "GPU"), telemetry.gpu_load),
+        (t("NPU", "NPU", "NPU"), telemetry.npu_load),
+        (t("ОЗУ", "RAM", "内存"), telemetry.ram_load),
+    ].into_iter().enumerate() {
+        if index != 0 {
+            load_row = load_row.child(divider());
+        }
+        load_row = load_row.child(cell(label, value.filter(|_| live).map(|v| v.to_string()), "%", None));
+    }
+
     div()
         .flex()
         .flex_col()
@@ -2176,7 +2194,9 @@ fn telemetry_overview(telemetry: &TelemetrySummary, disconnected: bool, palette:
                 .surface(div().flex().flex_col().rounded(px(palette.radius)))
                 .child(top)
                 .child(div().h(px(1.)).mx(px(14.)).bg(rgba(palette.separator)))
-                .child(bottom),
+                .child(bottom)
+                .child(div().h(px(1.)).mx(px(14.)).bg(rgba(palette.separator)))
+                .child(load_row),
         )
 }
 
@@ -2483,7 +2503,13 @@ fn compute_taskbar_flyout_bounds(cx: &App) -> Bounds<gpui::Pixels> {
         };
         let has_bar = unsafe { SHAppBarMessage(ABM_GETTASKBARPOS, &mut abd) } != 0
             && abd.rc.right > abd.rc.left
-            && abd.rc.bottom > abd.rc.top;
+            && abd.rc.bottom > abd.rc.top
+            && (!has_mon || unsafe {
+                MonitorFromPoint(Point {
+                    x: (abd.rc.left + abd.rc.right) / 2,
+                    y: (abd.rc.top + abd.rc.bottom) / 2,
+                }, MONITOR_DEFAULTTOPRIMARY) == hmon
+            });
         let edge = if has_bar {
             abd.edge
         } else if has_mon {
@@ -2567,8 +2593,21 @@ unsafe extern "system" {
 }
 
 fn main() {
+    let mut args = std::env::args_os().skip(1);
+    let first = args.next();
+    if let Some(origin) = first.as_deref().filter(|arg| browser_link::is_invocation(arg)) {
+        browser_link::run(origin);
+        return;
+    }
+    if first.is_some_and(|arg| arg == "--shortcut-icon") {
+        set_language_override(args.next().as_deref().and_then(std::ffi::OsStr::to_str).and_then(AppLanguage::from_code));
+        shortcut_icon::run();
+        return;
+    }
     watch_host_process();
-    Application::new().run(|cx: &mut App| {
+    let capture = std::env::var_os("GRANDHONOR_HOST_PID").is_none()
+        && std::env::var_os("GRANDHONOR_KEEP_OPEN").is_some();
+    Application::new().run(move |cx: &mut App| {
         // Inter (SIL OFL 1.1, Assets/fonts) is compiled in: no install, same type everywhere.
         let _ = cx.text_system().add_fonts(vec![
             Cow::Borrowed(include_bytes!("../../Assets/fonts/Inter-Regular.ttf").as_slice()),
@@ -2582,6 +2621,8 @@ fn main() {
         let result = cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
+                focus: !capture,
+                show: !capture,
                 window_min_size: Some(size(px(360.), px(440.))),
                 titlebar: Some(TitlebarOptions {
                     title: Some("GrandHonor".into()),
@@ -2596,20 +2637,23 @@ fn main() {
                 app_id: Some("GrandHonor.Panel".into()),
                 ..Default::default()
             },
-            |window, cx| {
+            move |window, cx| {
                 setup_window_chrome(window);
-                window.activate_window();
+                if capture {
+                    show_capture_window(window, bounds);
+                } else {
+                    window.activate_window();
+                }
                 cx.new(|cx| {
                     let focus = cx.focus_handle();
                     focus.focus(window);
                     // Like Windows flyouts, close as soon as the user clicks elsewhere:
                     // the panel process then exits and frees its memory and GPU resources.
                     // GRANDHONOR_KEEP_OPEN=1 keeps it open (screenshots only).
-                    let keep_open = std::env::var_os("GRANDHONOR_KEEP_OPEN").is_some();
                     cx.observe_window_activation(window, move |panel: &mut Panel, window, _| {
                         if window.is_window_active() {
                             panel.was_active = true;
-                        } else if panel.was_active && !keep_open && !panel.busy {
+                        } else if panel.was_active && !capture && !panel.busy {
                             // While an action runs the host may show a file dialog or a
                             // question: the panel stays and takes the focus back afterwards.
                             window.remove_window();
@@ -2642,7 +2686,6 @@ fn main() {
                         slider_sent: None,
                         slider_active: false,
                         slider_bounds: Default::default(),
-                        slider_commands: Default::default(),
                         scroll: HashMap::new(),
                         stable: Stabilizer::default(),
                     };
@@ -2658,12 +2701,39 @@ fn main() {
     });
 }
 
+fn show_capture_window(window: &Window, bounds: Bounds<gpui::Pixels>) {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        SWP_NOACTIVATE, SWP_NOZORDER, SWP_SHOWWINDOW, SetWindowPos,
+    };
+
+    if let Some(hwnd) = window_hwnd(window) {
+        let scale = window.scale_factor();
+        let pixels = |dimension| (f32::from(dimension) * scale).round() as i32;
+        unsafe {
+            let _ = SetWindowPos(
+                HWND(hwnd as *mut _), None, pixels(bounds.origin.x), pixels(bounds.origin.y),
+                pixels(bounds.size.width), pixels(bounds.size.height), SWP_NOACTIVATE | SWP_NOZORDER | SWP_SHOWWINDOW,
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn item(text: &str, children: Option<Vec<ControlItem>>) -> ControlItem {
-        ControlItem { text: text.into(), help: None, badge: None, command: None, selected: false, children, kind: None }
+        ControlItem { text: text.into(), help: None, badge: None, command: None, selected: false, children, kind: None, disabled: false }
+    }
+
+    #[test]
+    fn a_disabled_action_stays_a_row() {
+        let mut action = item("Install in Google Chrome", None);
+        action.kind = Some("card".into());
+        action.disabled = true;
+        assert!(matches!(row_role(&action), Role::Row));
+        assert!(matches!(row_role(&item("Installing", None)), Role::Header));
     }
 
     #[test]

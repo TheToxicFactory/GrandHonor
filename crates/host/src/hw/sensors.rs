@@ -1,5 +1,7 @@
 use super::com::ComGuard;
 use std::cell::RefCell;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 use super::wmi::{HonorWmiSession, WmiError, read_battery_power_watts};
 use crate::settings;
 use grandhonor_core::locale::t;
@@ -35,22 +37,48 @@ pub struct LiveSessionGuard;
 
 impl Drop for LiveSessionGuard {
     fn drop(&mut self) {
+        super::utilization::reset();
         LIVE_SESSION.with(|cell| cell.borrow_mut().take());
     }
 }
 
-pub fn read_and_store(request_id: &str) -> Result<SensorSnapshot, WmiError> {
-    let _com = ComGuard::mta();
-    LIVE_SESSION.with(|cell| match cell.borrow_mut().as_mut() {
-        Some(session) => read_with(session, request_id),
-        None => read_with(&mut HonorWmiSession::new(), request_id),
-    })
+/// Slow-changing readings (battery temperature, charge limit, firmware profile, backlight)
+/// are refreshed at most this often; fast ones are read on every panel sample. Below FRESH_FOR,
+/// so a slow value never turns into a dash between two full reads.
+const SLOW_INTERVAL: Duration = Duration::from_millis(2_500);
+const FRESH_FOR: Duration = Duration::from_secs(3);
+/// Tooltip and battery reads for the tray: at most this often.
+const TRAY_INTERVAL: Duration = Duration::from_millis(2_850);
+/// Tray icons: CPU temperature every tick (1 s), fans every 2 s, battery every 3 s.
+const TRAY_CPU_EVERY: Duration = Duration::from_millis(900);
+const TRAY_FANS_EVERY: Duration = Duration::from_millis(1_900);
+/// A tray reading older than this becomes a dash (one slow tick plus the read itself).
+const TRAY_FRESH_FOR: Duration = Duration::from_millis(3_500);
+
+#[derive(Clone, Default)]
+struct Sample {
+    values: SensorSnapshot,
+    fast: Option<Instant>,
+    cpu: Option<Instant>,
+    fans: [Option<Instant>; 2],
+    battery: Option<Instant>,
+    slow: Option<Instant>,
 }
 
-/// Slow-changing readings (battery temperature, charge limit, firmware profile, backlight)
-/// are refreshed at most this often; fast ones are read on every panel sample.
-const SLOW_REFRESH_MS: u64 = 5_000;
-static LAST_FULL_READ_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static SAMPLE: Mutex<Option<Sample>> = Mutex::new(None);
+static SAMPLE_GATE: Mutex<()> = Mutex::new(());
+
+fn recent(at: Option<Instant>, age: Duration) -> bool {
+    at.is_some_and(|at| at.elapsed() < age)
+}
+
+fn sample_cached() -> Sample {
+    SAMPLE.lock().ok().and_then(|sample| sample.clone()).unwrap_or_default()
+}
+
+pub fn read_and_store(_request_id: &str) -> Result<SensorSnapshot, WmiError> {
+    refresh(true, Duration::ZERO, false).map(|sample| sample.values)
+}
 /// Charger contract from the HONOR USB-C controller, refreshed with the slow readings:
 /// watts (0 = none) and when they were read. Shown only while fresh and on AC.
 static CHARGER_WATTS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
@@ -82,7 +110,7 @@ fn fresh_charger_watts() -> Option<u32> {
     use std::sync::atomic::Ordering;
     let at = CHARGER_READ_MS.load(Ordering::Acquire);
     let age = super::events::monotonic_ms().saturating_sub(at);
-    (at != 0 && age <= SLOW_REFRESH_MS + 1_000)
+    (at != 0 && age < FRESH_FOR.as_millis() as u64)
         .then(|| CHARGER_WATTS.load(Ordering::Acquire))
         .filter(|&w| w > 0)
 }
@@ -91,16 +119,24 @@ fn fresh_charger_watts() -> Option<u32> {
 /// read from the firmware each time (3 BIOS calls); the rest comes from a full read that is
 /// repeated every five seconds. Every returned value is from the latest successful read.
 pub fn sample_live() -> TelemetrySummary {
-    use std::sync::atomic::Ordering;
-    let now = super::events::monotonic_ms();
-    let last_full = LAST_FULL_READ_MS.load(Ordering::Acquire);
-    let previous = settings::read_tooltip_state()
-        .sensor_snapshot
-        .as_deref()
-        .and_then(SensorSnapshot::try_parse)
-        .filter(SensorSnapshot::is_fresh);
-    let need_full = previous.is_none() || last_full == 0 || now.saturating_sub(last_full) >= SLOW_REFRESH_MS;
+    let _ = refresh(false, Duration::from_millis(400), false);
+    let mut telemetry = build_telemetry(true).1;
+    [telemetry.cpu_load, telemetry.gpu_load, telemetry.npu_load, telemetry.ram_load] = super::utilization::sample();
+    telemetry
+}
 
+/// Tray icons without the panel: only the readings that are shown, only when due, and never
+/// the slow panel values (backlight, charge limit, profile, charger), so each tick is one
+/// or two firmware calls on the kept session.
+pub fn refresh_tray_icons(cpu: bool, fans: bool, battery: bool) {
+    let Ok(_gate) = SAMPLE_GATE.lock() else { return };
+    let mut sample = sample_cached();
+    let cpu = cpu && !recent(sample.cpu, TRAY_CPU_EVERY);
+    let fans = fans && !recent(sample.fans[0], TRAY_FANS_EVERY);
+    let battery = battery && !recent(sample.battery, TRAY_INTERVAL);
+    if !cpu && !fans && !battery {
+        return;
+    }
     let _com = ComGuard::mta();
     LIVE_SESSION.with(|cell| {
         let mut slot = cell.borrow_mut();
@@ -112,68 +148,114 @@ pub fn sample_live() -> TelemetrySummary {
                 &mut fresh_session
             }
         };
-        if need_full {
-            let _ = read_with(session, "panel");
+        let values = &mut sample.values;
+        if cpu {
+            values.cpu_temp = read_temperature(session, 0);
+            values.sampled_ticks = now_dotnet_ticks();
+            sample.cpu = Some(Instant::now());
+        }
+        if fans {
+            (values.fan1_rpm, values.fan1_target_rpm) = read_fan(session, 0);
+            sample.fans[0] = Some(Instant::now());
+            (values.fan2_rpm, values.fan2_target_rpm) = read_fan(session, 1);
+            sample.fans[1] = Some(Instant::now());
+        }
+        if battery {
+            values.battery_temp = read_temperature(session, 0x0E);
+            sample.battery = Some(Instant::now());
+        }
+    });
+    if let Ok(mut slot) = SAMPLE.lock() {
+        *slot = Some(sample);
+    }
+}
+
+pub fn refresh_tray(fast: bool, battery: bool) {
+    let _ = refresh(false, if fast { TRAY_INTERVAL } else { Duration::MAX }, battery);
+}
+
+pub fn tray_readings() -> [Option<i32>; 3] {
+    let sample = sample_cached();
+    let fan1 = sample.values.fan1_rpm.filter(|_| recent(sample.fans[0], TRAY_FRESH_FOR));
+    let fan2 = sample.values.fan2_rpm.filter(|_| recent(sample.fans[1], TRAY_FRESH_FOR));
+    [
+        sample.values.cpu_temp.filter(|_| recent(sample.cpu, TRAY_FRESH_FOR)),
+        sample.values.battery_temp.filter(|_| recent(sample.battery, TRAY_FRESH_FOR)),
+        fan1.max(fan2),
+    ]
+}
+
+fn refresh(force: bool, fast_interval: Duration, battery: bool) -> Result<Sample, WmiError> {
+    let _gate = SAMPLE_GATE.lock().map_err(|_| WmiError::Unavailable("Sensor cache unavailable".into()))?;
+    let mut sample = sample_cached();
+    let full = force || !recent(sample.slow, SLOW_INTERVAL);
+    let fast = full || !recent(sample.fast, fast_interval);
+    let battery = full || (battery && !recent(sample.battery, TRAY_INTERVAL));
+    if !fast && !battery {
+        return Ok(sample);
+    }
+    let _com = ComGuard::mta();
+    LIVE_SESSION.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        let mut fresh_session;
+        let session = match slot.as_mut() {
+            Some(session) => session,
+            None => {
+                fresh_session = HonorWmiSession::new();
+                &mut fresh_session
+            }
+        };
+        if full {
+            let values = &mut sample.values;
+            values.keyboard_backlight_mode = read_value(session, KEYBOARD_BACKLIGHT_GET_COMMAND, 1, "keyboard backlight mode");
+            (values.charge_start, values.charge_end) = read_battery_thresholds(session);
+            values.performance_mode = read_performance_mode(session);
             if system_power_status().1 == Some(true) {
                 read_charger(session);
             } else {
                 CHARGER_WATTS.store(0, std::sync::atomic::Ordering::Release);
             }
-        } else if let Some(mut snapshot) = previous {
-            let (fan1_rpm, fan1_target_rpm) = read_fan(session, 0);
-            let (fan2_rpm, fan2_target_rpm) = read_fan(session, 1);
-            snapshot.cpu_temp = read_temperature(session, 0x00);
-            snapshot.fan1_rpm = fan1_rpm;
-            snapshot.fan1_target_rpm = fan1_target_rpm;
-            snapshot.fan2_rpm = fan2_rpm;
-            snapshot.fan2_target_rpm = fan2_target_rpm;
-            snapshot.sampled_ticks = now_dotnet_ticks();
-            settings::set_sensor_snapshot(Some(&snapshot.serialize("panel")));
+            sample.slow = Some(Instant::now());
+            store_firmware_state(values);
+        }
+        if fast {
+            let values = &mut sample.values;
+            (values.fan1_rpm, values.fan1_target_rpm) = read_fan(session, 0);
+            sample.fans[0] = Some(Instant::now());
+            (values.fan2_rpm, values.fan2_target_rpm) = read_fan(session, 1);
+            sample.fans[1] = Some(Instant::now());
+            values.cpu_temp = read_temperature(session, 0);
+            values.sampled_ticks = now_dotnet_ticks();
+            sample.cpu = Some(Instant::now());
+            sample.fast = sample.cpu;
+        }
+        if battery {
+            sample.values.battery_temp = read_temperature(session, 0x0E);
+            sample.battery = Some(Instant::now());
         }
     });
-    build_telemetry(true).1
+    if let Ok(mut slot) = SAMPLE.lock() {
+        *slot = Some(sample.clone());
+    }
+    Ok(sample)
 }
 
-fn read_with(session: &mut HonorWmiSession, request_id: &str) -> Result<SensorSnapshot, WmiError> {
-    let backlight_mode = read_value(session, KEYBOARD_BACKLIGHT_GET_COMMAND, 1, "keyboard backlight mode");
-    let (charge_start, charge_end) = read_battery_thresholds(session);
-    let (fan1_rpm, fan1_target_rpm) = read_fan(session, 0);
-    let (fan2_rpm, fan2_target_rpm) = read_fan(session, 1);
-    let performance_mode = read_performance_mode(session);
-
-    let snapshot = SensorSnapshot {
-        sampled_ticks: now_dotnet_ticks(),
-        fan1_rpm,
-        fan2_rpm,
-        cpu_temp: read_temperature(session, 0x00),
-        battery_temp: read_temperature(session, 0x0E),
-        keyboard_backlight_mode: backlight_mode,
-        charge_start,
-        charge_end,
-        fan1_target_rpm,
-        fan2_target_rpm,
-        performance_mode,
-    };
-
-    settings::set_sensor_snapshot(Some(&snapshot.serialize(request_id)));
-    LAST_FULL_READ_MS.store(super::events::monotonic_ms(), std::sync::atomic::Ordering::Release);
-
-    if let Some(mode) = performance_mode
+fn store_firmware_state(snapshot: &SensorSnapshot) {
+    if let Some(mode) = snapshot.performance_mode
         && matches!(mode, SMART_MODE | PERFORMANCE_MODE | HUNTER_MODE)
     {
         settings::set_hunter_mode_active(mode == HUNTER_MODE);
         settings::set_performance_mode_active(mode == PERFORMANCE_MODE);
     }
 
-    if let Some(level) = backlight_mode.and_then(BacklightLevel::from_wmi_byte) {
+    if let Some(level) = snapshot.keyboard_backlight_mode.and_then(BacklightLevel::from_wmi_byte) {
         settings::set_keyboard_backlight(Some(level));
     }
 
-    if let Some(mode) = BatteryMode::from_thresholds(charge_start, charge_end) {
+    if let Some(mode) = BatteryMode::from_thresholds(snapshot.charge_start, snapshot.charge_end) {
         settings::set_battery_protection(Some(mode));
     }
 
-    Ok(snapshot)
 }
 
 fn read_fan(session: &mut HonorWmiSession, index: u8) -> (Option<i32>, Option<i32>) {
@@ -267,11 +349,8 @@ fn read_value(
 
 pub fn build_telemetry(include_power_watts: bool) -> (String, TelemetrySummary) {
     let state = settings::read_tooltip_state();
-    let hw = state
-        .sensor_snapshot
-        .as_deref()
-        .and_then(SensorSnapshot::try_parse)
-        .filter(SensorSnapshot::is_fresh);
+    let sample = sample_cached();
+    let slow = recent(sample.slow, FRESH_FOR).then_some(&sample.values);
 
     let mode_label = if state.hunter_mode_active {
         "HUNTER".to_string()
@@ -281,11 +360,9 @@ pub fn build_telemetry(include_power_watts: bool) -> (String, TelemetrySummary) 
         t("Обычный HONOR", "HONOR Standard", "HONOR 标准").to_string()
     };
 
-    let backlight_level = hw
-        .as_ref()
+    let backlight_level = slow
         .and_then(|s| s.keyboard_backlight_mode)
-        .and_then(BacklightLevel::from_wmi_byte)
-        .or(state.keyboard_backlight);
+        .and_then(BacklightLevel::from_wmi_byte);
     let backlight_label = match backlight_level {
         Some(BacklightLevel::Off) => t("выкл.", "off", "关").to_string(),
         Some(BacklightLevel::Low) => t("слабая", "weak", "弱").to_string(),
@@ -293,15 +370,10 @@ pub fn build_telemetry(include_power_watts: bool) -> (String, TelemetrySummary) 
         None => "—".to_string(),
     };
 
-    let charge_label = match hw.as_ref().and_then(|s| Some((s.charge_start?, s.charge_end?))) {
+    let charge_label = match slow.and_then(|s| Some((s.charge_start?, s.charge_end?))) {
         Some((start, end)) => format!("{start}–{end}%"),
-        None => match state.battery_protection {
-            Some(BatteryMode::Home) => "40–70%".to_string(),
-            Some(BatteryMode::Office) => "70–90%".to_string(),
-            Some(BatteryMode::Travel) => "95–100%".to_string(),
-            Some(BatteryMode::Disabled) => t("выкл.", "off", "关").to_string(),
-            None => "—".to_string(),
-        },
+        // No fresh firmware reading: a dash, never the saved choice in its place.
+        None => "—".to_string(),
     };
 
     let power_watts = if include_power_watts {
@@ -312,12 +384,14 @@ pub fn build_telemetry(include_power_watts: bool) -> (String, TelemetrySummary) 
     let power_label = power_watts.map(format_power_watts);
     let (battery_percent, ac_online) = system_power_status();
 
-    let cpu_temp = hw.as_ref().and_then(|s| s.cpu_temp);
-    let battery_temp = hw.as_ref().and_then(|s| s.battery_temp);
-    let fan1_rpm = hw.as_ref().and_then(|s| s.fan1_rpm);
-    let fan1_target = hw.as_ref().and_then(|s| s.fan1_target_rpm).filter(|&v| v > 0);
-    let fan2_rpm = hw.as_ref().and_then(|s| s.fan2_rpm);
-    let fan2_target = hw.as_ref().and_then(|s| s.fan2_target_rpm).filter(|&v| v > 0);
+    let cpu_temp = sample.values.cpu_temp.filter(|_| recent(sample.cpu, FRESH_FOR));
+    let battery_temp = recent(sample.battery, FRESH_FOR).then_some(sample.values.battery_temp).flatten();
+    let fan1_fresh = recent(sample.fans[0], FRESH_FOR);
+    let fan2_fresh = recent(sample.fans[1], FRESH_FOR);
+    let fan1_rpm = sample.values.fan1_rpm.filter(|_| fan1_fresh);
+    let fan1_target = sample.values.fan1_target_rpm.filter(|&rpm| fan1_fresh && rpm > 0);
+    let fan2_rpm = sample.values.fan2_rpm.filter(|_| fan2_fresh);
+    let fan2_target = sample.values.fan2_target_rpm.filter(|&rpm| fan2_fresh && rpm > 0);
 
     let mut lines = vec![
         format!("{}{}", t("Режим: ", "Mode: ", "模式："), mode_label),
@@ -354,7 +428,7 @@ pub fn build_telemetry(include_power_watts: bool) -> (String, TelemetrySummary) 
     }
 
     let summary = TelemetrySummary {
-        sampled_ticks: hw.as_ref().map(|snapshot| snapshot.sampled_ticks),
+        sampled_ticks: sample.fast.map(|_| sample.values.sampled_ticks),
         mode_label,
         performance_active: state.performance_mode_active,
         hunter_active: state.hunter_mode_active,
@@ -372,6 +446,10 @@ pub fn build_telemetry(include_power_watts: bool) -> (String, TelemetrySummary) 
         ac_online,
         cpu_watts: if include_power_watts { super::cpu_power::package_watts() } else { None },
         charger_watts: if include_power_watts && ac_online == Some(true) { fresh_charger_watts() } else { None },
+        cpu_load: None,
+        gpu_load: None,
+        npu_load: None,
+        ram_load: None,
     };
 
     (lines.join("\n"), summary)

@@ -4,21 +4,20 @@
 //! Bluetooth or Wi-Fi adapter, and scanning for new hardware. Runs only when the panel asks.
 
 use std::mem::size_of;
-use std::sync::Mutex;
-use std::time::{Duration, Instant};
 use windows::Win32::Devices::DeviceAndDriverInstallation::{
     CM_DEVNODE_STATUS_FLAGS, CM_LOCATE_DEVNODE_NORMAL, CM_PROB, CM_REENUMERATE_SYNCHRONOUS, CR_SUCCESS,
     CM_Get_DevNode_Status, CM_Locate_DevNodeW, CM_Reenumerate_DevNode, DI_NEEDREBOOT, DI_NEEDRESTART,
     DIROLLBACKDRIVER_FLAGS, DiRollbackDriver,
     DICS_FLAG_GLOBAL, DICS_PROPCHANGE, DIF_PROPERTYCHANGE, DIGCF_ALLCLASSES, DIGCF_PRESENT, DN_HAS_PROBLEM,
     HDEVINFO, SETUP_DI_REGISTRY_PROPERTY, SP_CLASSINSTALL_HEADER, SP_DEVINFO_DATA, SP_DEVINSTALL_PARAMS_W,
-    SP_PROPCHANGE_PARAMS, SPDRP_DEVICEDESC, SPDRP_FRIENDLYNAME, SetupDiCallClassInstaller,
+    SP_PROPCHANGE_PARAMS, SPDRP_DEVICEDESC, SPDRP_DRIVER, SPDRP_FRIENDLYNAME, SetupDiCallClassInstaller,
     SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInfo, SetupDiGetClassDevsW, SetupDiGetDeviceInstallParamsW,
     SetupDiGetDeviceInstanceIdW, SetupDiGetDeviceRegistryPropertyW, SetupDiSetClassInstallParamsW,
 };
+use windows::Win32::Foundation::ERROR_NO_MORE_ITEMS;
 use windows_core::{GUID, PCWSTR};
 
-const GUID_DEVCLASS_BLUETOOTH: GUID = GUID::from_u128(0xe0cbf06c_cd8b_4647_bb8a_263b43f0f974);
+pub(super) const GUID_DEVCLASS_BLUETOOTH: GUID = GUID::from_u128(0xe0cbf06c_cd8b_4647_bb8a_263b43f0f974);
 const GUID_DEVCLASS_NET: GUID = GUID::from_u128(0x4d36e972_e325_11ce_bfc1_08002be10318);
 /// Disabled on purpose by the user: not a fault.
 const CM_PROB_DISABLED: u32 = 22;
@@ -28,6 +27,19 @@ pub struct Device {
     pub instance_id: String,
     pub name: String,
     pub problem: u32,
+}
+
+pub(super) struct PresentDevice {
+    pub class: GUID,
+    pub device: Device,
+    pub has_driver: bool,
+    pub status_known: bool,
+}
+
+impl PresentDevice {
+    pub fn has_problem(&self) -> bool {
+        self.status_known && self.device.problem != 0 && self.device.problem != CM_PROB_DISABLED
+    }
 }
 
 /// What a problem code means, in a few words (the common Device Manager codes).
@@ -68,62 +80,59 @@ fn instance_id(set: HDEVINFO, data: &SP_DEVINFO_DATA) -> Option<String> {
 }
 
 /// Calls `visit` for every present device of `class` (all classes when None) until it returns true.
-fn for_each(class: Option<&GUID>, mut visit: impl FnMut(HDEVINFO, &SP_DEVINFO_DATA) -> bool) {
+fn for_each(class: Option<&GUID>, mut visit: impl FnMut(HDEVINFO, &SP_DEVINFO_DATA) -> bool) -> windows_core::Result<()> {
     let flags = if class.is_some() { DIGCF_PRESENT } else { DIGCF_PRESENT | DIGCF_ALLCLASSES };
-    let Ok(set) = (unsafe { SetupDiGetClassDevsW(class.map(|g| g as *const GUID), PCWSTR::null(), None, flags) }) else {
-        return;
-    };
+    let set = unsafe { SetupDiGetClassDevsW(class.map(|g| g as *const GUID), PCWSTR::null(), None, flags) }?;
     let mut data = SP_DEVINFO_DATA { cbSize: size_of::<SP_DEVINFO_DATA>() as u32, ..Default::default() };
     let mut index = 0;
-    while unsafe { SetupDiEnumDeviceInfo(set, index, &mut data) }.is_ok() {
+    let result = loop {
+        match unsafe { SetupDiEnumDeviceInfo(set, index, &mut data) } {
+            Ok(()) => {}
+            Err(error) if error.code() == ERROR_NO_MORE_ITEMS.to_hresult() => break Ok(()),
+            Err(error) => break Err(error),
+        }
         index += 1;
         if visit(set, &data) {
-            break;
+            break Ok(());
         }
-    }
+    };
     let _ = unsafe { SetupDiDestroyDeviceInfoList(set) };
+    result
 }
 
-fn scan_problems() -> Vec<Device> {
+pub(super) fn inventory(cancelled: impl Fn() -> bool) -> windows_core::Result<Vec<PresentDevice>> {
     let mut out = Vec::new();
     for_each(None, |set, data| {
+        if cancelled() {
+            return true;
+        }
         let mut status = CM_DEVNODE_STATUS_FLAGS::default();
         let mut problem = CM_PROB::default();
-        let ok = unsafe { CM_Get_DevNode_Status(&mut status, &mut problem, data.DevInst, 0) } == CR_SUCCESS;
-        if ok && status.0 & DN_HAS_PROBLEM.0 != 0 && problem.0 != CM_PROB_DISABLED {
-            let name = property(set, data, SPDRP_FRIENDLYNAME)
-                .or_else(|| property(set, data, SPDRP_DEVICEDESC))
-                .unwrap_or_else(|| grandhonor_core::locale::t("Неизвестное устройство", "Unknown device", "未知设备").to_string());
-            if let Some(id) = instance_id(set, data) {
-                out.push(Device { instance_id: id, name, problem: problem.0 });
-            }
-        }
+        let status_known = unsafe { CM_Get_DevNode_Status(&mut status, &mut problem, data.DevInst, 0) } == CR_SUCCESS;
+        let name = property(set, data, SPDRP_FRIENDLYNAME)
+            .or_else(|| property(set, data, SPDRP_DEVICEDESC))
+            .unwrap_or_else(|| grandhonor_core::locale::t("Неизвестное устройство", "Unknown device", "未知设备").to_string());
+        out.push(PresentDevice {
+            class: data.ClassGuid,
+            device: Device {
+                instance_id: instance_id(set, data).unwrap_or_default(),
+                name,
+                problem: if status.0 & DN_HAS_PROBLEM.0 != 0 { problem.0 } else { 0 },
+            },
+            has_driver: property(set, data, SPDRP_DRIVER).is_some(),
+            status_known,
+        });
         false
-    });
-    out.sort_by(|a, b| a.name.cmp(&b.name));
-    out
+    })?;
+    out.sort_by(|a, b| a.device.name.cmp(&b.device.name));
+    Ok(out)
 }
 
-static CACHE: Mutex<Option<(Instant, Vec<Device>)>> = Mutex::new(None);
-
-/// Devices with a problem, re-read at most every 10 s (the panel rebuilds its page often).
-pub fn problems() -> Vec<Device> {
-    let Ok(mut cache) = CACHE.lock() else { return scan_problems() };
-    if let Some((at, list)) = cache.as_ref()
-        && at.elapsed() < Duration::from_secs(10)
-    {
-        return list.clone();
-    }
-    let list = scan_problems();
-    *cache = Some((Instant::now(), list.clone()));
-    list
-}
-
-/// Forgets the cached scan, so the next page shows the state after a repair.
-pub fn invalidate() {
-    if let Ok(mut cache) = CACHE.lock() {
-        *cache = None;
-    }
+pub fn problems() -> windows_core::Result<(Vec<Device>, bool)> {
+    let devices = inventory(|| false)?;
+    let complete = !devices.is_empty() && devices.iter().all(|device| device.status_known);
+    let problems = devices.into_iter().filter(PresentDevice::has_problem).map(|device| device.device).collect();
+    Ok((problems, complete))
 }
 
 /// Restarts one device. Ok(true) when Windows says a reboot is needed to finish.
@@ -162,7 +171,7 @@ pub fn restart_device(instance: &str) -> Result<bool, String> {
             return true;
         }
         false
-    });
+    }).map_err(|error| error.to_string())?;
     result
 }
 
@@ -187,7 +196,7 @@ pub fn rollback_driver(instance: &str) -> Result<bool, String> {
             return true;
         }
         false
-    });
+    }).map_err(|error| error.to_string())?;
     result
 }
 
@@ -214,7 +223,7 @@ pub fn restart_radio(radio: Radio) -> Result<bool, String> {
             return true;
         }
         false
-    });
+    }).map_err(|error| error.to_string())?;
     result
 }
 

@@ -10,7 +10,7 @@
 //!    or the new host does not stay up, it restores the backup and starts the old version.
 //! 4. `start_rollback` brings back the backed-up version on request (System tab).
 
-use crate::drivers::http::{download_to_file_with, get_text};
+use crate::drivers::http::{download_to_file_with, get_text, get_text_once};
 use crate::drivers::trust::compute_sha256_hex;
 use crate::scheduler::{create_protected_directory, install_root, is_installation_path, is_path_protected};
 use grandhonor_core::url_guard::validate_update_redirect;
@@ -57,6 +57,9 @@ fn set_state(state: State) {
 }
 
 static CHECKING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static LAST_CHECK: Mutex<Option<Instant>> = Mutex::new(None);
+pub const CHECK_INTERVAL: Duration = Duration::from_secs(3600);
+const CHECK_COALESCE: Duration = Duration::from_secs(55 * 60);
 
 /// True while a check runs (the panel shows "Checking…" and asks again shortly).
 pub fn checking() -> bool {
@@ -66,19 +69,48 @@ pub fn checking() -> bool {
 /// Asks GitHub for the latest release on a background thread (up to 15 s) and remembers the
 /// answer for the panel; the panel stays usable meanwhile.
 pub fn check() {
+    start_check(false);
+}
+
+pub fn check_automatically() {
+    if crate::settings::automatic_update_checks() && !installing() {
+        start_check(true);
+    }
+}
+
+fn start_check(automatic: bool) {
     use std::sync::atomic::Ordering;
     if CHECKING.swap(true, Ordering::AcqRel) {
         return;
     }
-    let spawned = std::thread::Builder::new().name("update-check".into()).spawn(|| {
-        set_state(match fetch_latest() {
-            Ok(Some(release)) => State::Available(release),
-            Ok(None) => State::UpToDate,
+    if let Ok(mut last) = LAST_CHECK.lock() {
+        if automatic && last.is_some_and(|previous| previous.elapsed() < CHECK_COALESCE) {
+            CHECKING.store(false, Ordering::Release);
+            return;
+        }
+        *last = Some(Instant::now());
+    }
+    let spawned = std::thread::Builder::new().name("update-check".into()).stack_size(256 * 1024).spawn(move || {
+        match fetch_latest(automatic) {
+            Ok(Some(release)) => {
+                let changed = !matches!(state(), Some(State::Available(previous)) if previous.version == release.version);
+                set_state(State::Available(release));
+                if automatic && changed && crate::settings::automatic_update_checks() {
+                    crate::osd::notify(crate::osd::Icon::Display, grandhonor_core::locale::t(
+                        "Доступно обновление GrandHonor",
+                        "GrandHonor update available",
+                        "GrandHonor 有可用更新",
+                    ));
+                }
+            }
+            Ok(None) => set_state(State::UpToDate),
             Err(err) => {
                 crate::log::error(&format!("Update check failed: {err}"));
-                State::Failed(err)
+                if !automatic {
+                    set_state(State::Failed(err));
+                }
             }
-        });
+        }
         CHECKING.store(false, Ordering::Release);
     });
     if spawned.is_err() {
@@ -86,8 +118,8 @@ pub fn check() {
     }
 }
 
-fn fetch_latest() -> Result<Option<Release>, String> {
-    let response = get_text(RELEASES_API, 15_000)?;
+fn fetch_latest(automatic: bool) -> Result<Option<Release>, String> {
+    let response = if automatic { get_text_once(RELEASES_API, 8_000) } else { get_text(RELEASES_API, 15_000) }?;
     if matches!(response.status, 403 | 429) && is_rate_limited(&response.body) {
         return Err(rate_limit_message(response.rate_limit_reset));
     }
@@ -222,10 +254,55 @@ fn backup_current() -> Result<(), String> {
         std::fs::remove_dir_all(&dir).map_err(|e| format!("{}: {e}", grandhonor_core::locale::t("Не удалось очистить старую копию", "Could not clear the old backup", "无法清除旧备份")))?;
     }
     create_protected_directory(&dir, true)?;
-    for file in ["GrandHonor.exe", "GrandHonor.Panel.exe"] {
-        std::fs::copy(app.join(file), dir.join(file)).map_err(|e| format!("{} {file}: {e}", grandhonor_core::locale::t("Не удалось сохранить копию", "Backup failed:", "备份失败：")))?;
-    }
+    // The whole installation (executables, extension, native messaging manifests), so a
+    // rollback returns every file of the previous version, not only the two executables.
+    copy_tree(&app, &dir, true).map_err(|e| format!("{} {e}", grandhonor_core::locale::t("Не удалось сохранить копию", "Backup failed:", "备份失败：")))?;
     std::fs::write(dir.join("version.txt"), env!("CARGO_PKG_VERSION")).map_err(|e| e.to_string())
+}
+
+/// Files of the installation that a backup skips: the uninstaller (setup writes its own) and
+/// renamed copies of running executables.
+fn skipped_in_backup(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.starts_with("unins") || lower.ends_with(".old") || lower == "version.txt"
+}
+
+/// Copies `from` into `to` recursively (no links followed). `top` marks the installation root,
+/// where uninstaller files are skipped.
+fn copy_tree(from: &Path, to: &Path, top: bool) -> Result<(), String> {
+    for entry in std::fs::read_dir(from).map_err(|e| format!("{}: {e}", from.display()))? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let name = entry.file_name();
+        if top && skipped_in_backup(&name.to_string_lossy()) {
+            continue;
+        }
+        let kind = entry.file_type().map_err(|e| e.to_string())?;
+        let target = to.join(&name);
+        if kind.is_symlink() {
+            continue;
+        } else if kind.is_dir() {
+            std::fs::create_dir_all(&target).map_err(|e| format!("{}: {e}", target.display()))?;
+            copy_tree(&entry.path(), &target, false)?;
+        } else {
+            copy_with_retry(&entry.path(), &target)?;
+        }
+    }
+    Ok(())
+}
+
+/// A file can be held for a moment by the exiting host or the browser: up to 10 s of retries.
+fn copy_with_retry(from: &Path, to: &Path) -> Result<(), String> {
+    let mut last = String::new();
+    for _ in 0..20 {
+        match std::fs::copy(from, to) {
+            Ok(_) => return Ok(()),
+            Err(e) => {
+                last = e.to_string();
+                std::thread::sleep(Duration::from_millis(500));
+            }
+        }
+    }
+    Err(format!("{}: {last}", to.display()))
 }
 
 fn spawn_helper(dir: &Path, args: &[&str]) -> Result<(), String> {
@@ -347,21 +424,15 @@ fn restore_backup() -> Result<(), String> {
     if !backup_trusted() {
         return Err(grandhonor_core::locale::t("Сохранённая прошлая версия лежит в незащищённой папке, восстанавливать её нельзя", "The stored previous version is not in a protected folder; not restoring it", "保存的旧版本不在受保护的文件夹中，无法恢复").into());
     }
-    for file in ["GrandHonor.exe", "GrandHonor.Panel.exe"] {
-        let mut last = String::new();
-        let ok = (0..20).any(|_| match std::fs::copy(dir.join(file), app.join(file)) {
-            Ok(_) => true,
-            Err(e) => {
-                last = e.to_string();
-                std::thread::sleep(Duration::from_millis(500));
-                false
-            }
-        });
-        if !ok {
-            return Err(format!("{} {file}: {last}", grandhonor_core::locale::t("Не удалось восстановить", "Could not restore", "无法恢复")));
+    // A running executable (the browser may hold the panel as its settings link) cannot be
+    // overwritten but can be renamed: move it aside first, then copy.
+    for file in ["GrandHonor.Panel.exe", "GrandHonor.Video.exe"] {
+        let path = app.join(file);
+        if path.is_file() && std::fs::OpenOptions::new().write(true).open(&path).is_err() {
+            let _ = std::fs::rename(&path, app.join(format!("{file}.old")));
         }
     }
-    Ok(())
+    copy_tree(&dir, &app, true).map_err(|e| format!("{} {e}", grandhonor_core::locale::t("Не удалось восстановить", "Could not restore", "无法恢复")))
 }
 
 /// Helper entry: `--apply-update <setup>`.
@@ -420,8 +491,17 @@ pub fn apply_rollback() -> i32 {
     if !wait_host_exit(Duration::from_secs(30)) {
         return 1;
     }
+    let restore_processor_values = crate::hw::power::linked()
+        && rollback_version().is_some_and(|version| {
+            grandhonor_core::version::compare_versions(&version, "2.5.6") != std::cmp::Ordering::Greater
+        });
     match restore_backup() {
         Ok(()) => {
+            // Earlier versions only knew about their own processor profile selections.
+            // Restore each scheme before the older host reapplies those selections.
+            if restore_processor_values {
+                crate::hw::cpu_profile::restore_original();
+            }
             crate::log::info("Rolled back to the stored version");
             let _ = start_installed_host();
             0

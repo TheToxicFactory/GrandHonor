@@ -108,6 +108,7 @@ pub fn register(hwnd: HWND) {
     let Ok(_g) = HOOK_LOCK.lock() else { return };
     let running = HOOK_THREAD.load(Ordering::Acquire);
     if want && running == 0 {
+        YOYO_DOWN.store(false, Ordering::Release);
         let (tx, rx) = std::sync::mpsc::channel();
         let _ = std::thread::Builder::new().name("copilot-key".into()).stack_size(128 * 1024).spawn(move || hook_thread(tx));
         if let Ok(id) = rx.recv() {
@@ -172,18 +173,25 @@ unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARA
             }
             return LRESULT(1);
         }
-        if YOYO_ON.load(Ordering::Acquire)
-            && info.vkCode == u32::from(VK_F11.0)
+        if info.vkCode == u32::from(VK_F11.0)
             // F11 sent by a program (remote desktop, on-screen keyboard) is not the YOYO key.
             && (info.flags.0 & windows::Win32::UI::WindowsAndMessaging::LLKHF_INJECTED.0) == 0
-            && !(held(VK_CONTROL) || held(VK_MENU) || held(VK_SHIFT) || win_held())
         {
-            if down && !YOYO_DOWN.swap(true, Ordering::AcqRel) {
-                pressed(YOYO);
-            } else if !down {
-                YOYO_DOWN.store(false, Ordering::Release);
+            // Once a key-down is swallowed, swallow its repeats and matching key-up even if
+            // a modifier was pressed in the meantime. A modified first press belongs to Windows.
+            if !down && YOYO_DOWN.swap(false, Ordering::AcqRel) {
+                return LRESULT(1);
             }
-            return LRESULT(1);
+            if down && YOYO_DOWN.load(Ordering::Acquire) {
+                return LRESULT(1);
+            }
+            if down && YOYO_ON.load(Ordering::Acquire)
+                && !(held(VK_CONTROL) || held(VK_MENU) || held(VK_SHIFT) || win_held())
+            {
+                YOYO_DOWN.store(true, Ordering::Release);
+                pressed(YOYO);
+                return LRESULT(1);
+            }
         }
     }
     unsafe { CallNextHookEx(Some(HHOOK::default()), code, wparam, lparam) }

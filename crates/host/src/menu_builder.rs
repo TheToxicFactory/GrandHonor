@@ -4,11 +4,8 @@ use crate::hw::backlight::{
     BacklightScheduleService, set_backlight_level, set_backlight_timeout,
 };
 use crate::hw::battery::apply_battery_mode_and_save;
-use crate::hw::power::{
-    WINDOWS_BALANCED, WINDOWS_EFFICIENCY, WINDOWS_PERFORMANCE, apply_power_unlock_and_save,
-    can_enable_performance_mode, set_windows_power_mode, windows_power_mode,
-};
-use crate::hw::sensors::{build_telemetry, read_and_store};
+use crate::hw::power;
+use crate::hw::sensors::build_telemetry;
 use crate::hw::touchpad::{
     apply_gesture, apply_haptics, is_gesture_enabled, is_supported as touchpad_supported,
 };
@@ -19,7 +16,6 @@ use grandhonor_core::protocol::{
     BacklightLevel, BatteryMode, ControlItem, PanelState, TouchpadEdgeGesture, TouchpadHaptics,
 };
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use windows::Win32::UI::WindowsAndMessaging::{
     MB_ICONERROR, MB_ICONINFORMATION, MB_OK, MB_SETFOREGROUND, MB_TOPMOST, MessageBoxW,
@@ -59,6 +55,7 @@ impl MenuBuilder {
             selected: false,
             children: Some(Vec::new()),
             kind: kind.map(str::to_string),
+            disabled: false,
         });
         SubMenu {
             parent_item: &mut self.items[idx],
@@ -103,7 +100,8 @@ impl MenuBuilder {
             language: Some(grandhonor_core::locale::language().code().to_string()),
             notice: None,
             notice_is_error: false,
-            job_running: crate::updater::checking() || crate::updater::installing() || crate::drivers::diagnostics::busy(),
+            job_running: crate::updater::checking() || crate::updater::installing() || crate::drivers::diagnostics::busy()
+                || crate::hw::device_check::busy(),
         };
         let mut state = state;
         if let Some((text, error)) = PANEL_NOTICE.lock().ok().and_then(|mut s| s.take()) {
@@ -143,6 +141,7 @@ impl<'a> SubMenu<'a> {
             selected: false,
             children: Some(Vec::new()),
             kind: kind.map(str::to_string),
+            disabled: false,
         });
         SubMenu {
             parent_item: &mut children[idx],
@@ -172,6 +171,7 @@ impl<'a> SubMenu<'a> {
         enabled: bool,
         selected: bool,
     ) {
+        let has_action = action.is_some();
         let command = if enabled && let Some(cb) = action {
             let id = self
                 .next_id
@@ -198,6 +198,7 @@ impl<'a> SubMenu<'a> {
             selected,
             children: None,
             kind: kind.map(str::to_string),
+            disabled: !enabled && has_action,
         });
     }
 
@@ -227,6 +228,7 @@ impl<'a> SubMenu<'a> {
             selected: false,
             children: None,
             kind: None,
+            disabled: false,
         });
     }
 }
@@ -240,28 +242,9 @@ pub struct HostContext {
     #[cfg_attr(not(debug_assertions), allow(dead_code))]
     pub on_notify: Arc<dyn Fn(&str, &str) + Send + Sync>,
     pub on_quit: Arc<dyn Fn() + Send + Sync>,
-    pub last_sensor_ms: Arc<AtomicU64>,
-}
-
-pub fn refresh_sensors_throttled(ctx: &HostContext, min_interval_ms: u64) {
-    let now = crate::hw::events::monotonic_ms();
-    let prev = ctx.last_sensor_ms.load(Ordering::Acquire);
-    if now.saturating_sub(prev) < min_interval_ms && prev != 0 {
-        return;
-    }
-    if ctx
-        .last_sensor_ms
-        .compare_exchange(prev, now, Ordering::AcqRel, Ordering::Acquire)
-        .is_ok()
-    {
-        if read_and_store("panel").is_ok() {
-            (ctx.on_update_tray_icon)();
-        }
-    }
 }
 
 pub fn build_panel_snapshot(ctx: &HostContext) -> (PanelState, HashMap<u32, ActionFn>) {
-    refresh_sensors_throttled(ctx, 5_000);
     let mut root = MenuBuilder::new();
 
     // 1. Power & Battery
@@ -270,40 +253,7 @@ pub fn build_panel_snapshot(ctx: &HostContext) -> (PanelState, HashMap<u32, Acti
         Some(t("Заряд и производительность", "Charging and performance", "充电与性能")),
         Some("battery"),
     );
-    if let Some(current) = windows_power_mode() {
-        power.add_item(
-            t("Режим питания", "Power mode", "电源模式"),
-            None, false, false,
-            Some(t(
-                "Режим Windows, отдельно для зарядки и батареи. Fn+P переключает по кругу",
-                "The Windows mode, kept separately on the charger and on battery. Fn+P cycles it",
-                "Windows 电源模式，接通电源与使用电池分别记忆。Fn+P 循环切换",
-            )),
-        );
-        let mut modes = power.add_container("", "segment");
-        for (mode, label) in [
-            (WINDOWS_EFFICIENCY, t("Экономия", "Efficiency", "能效")),
-            (WINDOWS_BALANCED, t("Баланс", "Balanced", "平衡")),
-            (WINDOWS_PERFORMANCE, t("Производительность", "Performance", "性能")),
-        ] {
-            modes.add_command_ex(
-                label,
-                Some(Box::new(move || {
-                    match set_windows_power_mode(mode) {
-                        Ok(()) => {
-                            let icon = if mode == WINDOWS_EFFICIENCY { Icon::Normal } else if mode == WINDOWS_PERFORMANCE { Icon::Performance } else { Icon::Balanced };
-                            crate::osd::show(icon, label, None);
-                        }
-                        Err(err) => show_error_box(&err),
-                    }
-                })),
-                None, None, Some("pill"), true, current == mode,
-            );
-        }
-    }
-    build_cpu_profile_section(&mut power);
-    power.add_separator();
-    build_performance_section(&mut power, ctx.on_update_tray_icon.clone());
+    build_power_profile_section(&mut power);
     power.add_separator();
     build_battery_section(&mut power);
     power.add_separator();
@@ -314,7 +264,7 @@ pub fn build_panel_snapshot(ctx: &HostContext) -> (PanelState, HashMap<u32, Acti
     // 2. Display: refresh rate and HONOR's Display & Eye Comfort modes.
     let mut screen = root.add_submenu(
         t("Экран", "Display", "显示"),
-        Some(t("Частота и защита зрения", "Refresh rate and eye comfort", "刷新率与护眼")),
+        Some(t("Частота, HDR и защита зрения", "Refresh rate, HDR and eye comfort", "刷新率、HDR 与护眼")),
         Some("display"),
     );
     if let Some((rates, current)) = crate::hw::display::rates() {
@@ -334,7 +284,11 @@ pub fn build_panel_snapshot(ctx: &HostContext) -> (PanelState, HashMap<u32, Acti
             );
         }
     }
+    build_hdr_section(&mut screen);
     build_display_filter_section(&mut screen);
+    build_oled_section(&mut screen, ctx.on_update_tray_icon.clone());
+    build_video_section(&mut screen);
+    build_browser_video_section(&mut screen);
 
     // 3. Keyboard
     let mut kb = root.add_submenu(
@@ -360,7 +314,8 @@ pub fn build_panel_snapshot(ctx: &HostContext) -> (PanelState, HashMap<u32, Acti
             )),
             Some("touchpad"),
         );
-        build_touchpad_section(&mut tp);
+        build_touchpad_section(&mut tp, ctx.tray_hwnd);
+        build_media_seek_section(&mut tp, ctx.tray_hwnd);
     }
 
     // 5. Drivers and BIOS
@@ -480,6 +435,8 @@ pub fn build_panel_snapshot(ctx: &HostContext) -> (PanelState, HashMap<u32, Acti
         false,
     );
     cfg.add_separator();
+    build_tray_metrics_section(&mut cfg, ctx.on_update_tray_icon.clone());
+    cfg.add_separator();
     cfg.add_item(t("Язык", "Language", "语言"), None, false, false, None);
     let chosen = settings::language_preference();
     let mut languages = cfg.add_container("", "segment");
@@ -495,7 +452,7 @@ pub fn build_panel_snapshot(ctx: &HostContext) -> (PanelState, HashMap<u32, Acti
             None, None, Some("pill"), true, chosen == Some(lang),
         );
     }
-    build_update_section(&mut cfg, ctx.on_quit.clone());
+    build_update_section(&mut cfg, ctx.on_quit.clone(), ctx.on_update_tray_icon.clone());
     build_settings_transfer_section(&mut cfg, ctx.on_quit.clone());
     cfg.add_separator();
     let quit_cb = ctx.on_quit.clone();
@@ -513,7 +470,7 @@ pub fn build_panel_snapshot(ctx: &HostContext) -> (PanelState, HashMap<u32, Acti
         false,
     );
 
-    let (status, telemetry) = build_telemetry(true);
+    let (status, telemetry) = build_telemetry(false);
     root.build_into(status, telemetry)
 }
 
@@ -546,10 +503,24 @@ fn build_settings_transfer_section(menu: &mut SubMenu<'_>, on_quit: Arc<dyn Fn()
 }
 
 /// GrandHonor updates from GitHub and rollback to the stored previous version (updater.rs).
-fn build_update_section(menu: &mut SubMenu<'_>, on_quit: Arc<dyn Fn() + Send + Sync>) {
+fn build_update_section(
+    menu: &mut SubMenu<'_>,
+    on_quit: Arc<dyn Fn() + Send + Sync>,
+    sync_timer: Arc<dyn Fn() + Send + Sync>,
+) {
     use crate::updater::{self, State};
     menu.add_separator();
     menu.add_item(t("Обновления GrandHonor", "GrandHonor updates", "GrandHonor 更新"), None, false, false, None);
+    let automatic = settings::automatic_update_checks();
+    menu.add_command_ex(
+        t("Проверять автоматически", "Check automatically", "自动检查"),
+        Some(Box::new(move || {
+            settings::set_automatic_update_checks(!automatic);
+            sync_timer();
+        })),
+        Some(t("Раз в час. Установка по вашему выбору", "Once an hour. You choose when to install", "每小时检查一次，由您决定何时安装")),
+        None, Some("switch"), true, automatic,
+    );
     let installed = is_installation_path();
     let version = env!("CARGO_PKG_VERSION");
     match updater::state() {
@@ -652,9 +623,9 @@ fn build_app_profiles_section(menu: &mut SubMenu<'_>) {
         t("Программы", "Programs", "程序"),
         None, false, false,
         Some(t(
-            "Пока программа открыта: режим «Производительность» и наибольшая частота экрана. После закрытия всё вернётся",
-            "While a program is open: Performance mode and the highest refresh rate. Closing it puts both back",
-            "程序运行时使用「性能」模式与最高刷新率，关闭后恢复",
+            "Выбранная программа запрашивает профиль «Быстрый» и максимальную частоту экрана",
+            "A selected program requests Fast and the highest refresh rate",
+            "所选程序运行时请求快速配置和最高刷新率",
         )),
     );
     for app in apps.clone() {
@@ -711,9 +682,9 @@ fn build_night_section(menu: &mut SubMenu<'_>) {
             crate::hw::night_mode::poke();
         })),
         Some(t(
-            "Ночью режим «Экономия»: тише вентиляторы. Утром вернётся прежний режим",
-            "Efficiency mode at night: quieter fans. The previous mode returns in the morning",
-            "夜间使用能效模式，风扇更安静；早晨恢复原模式",
+            "По расписанию включает «Тихий». Ручной выбор действует до конца сценария или смены питания",
+            "Schedules Quiet. A manual choice lasts until the scenario ends or the power source changes",
+            "按时段启用安静配置。手动选择持续到场景结束或电源切换",
         )),
         None, Some("switch"), true, enabled,
     );
@@ -742,66 +713,52 @@ fn build_night_section(menu: &mut SubMenu<'_>) {
     }
 }
 
-/// "When the charger changes": per power source presets (see presets.rs).
-/// Power → Processor profile: Quiet / Balanced / Performance for the charger and for battery.
-fn build_cpu_profile_section(menu: &mut SubMenu<'_>) {
-    use crate::hw::cpu_profile::{Profile, apply, chosen};
-    menu.add_item(
-        t("Профиль процессора", "Processor profile", "处理器配置"),
-        None, false, false,
-        Some(t(
-            "Тихий — прохладнее и дольше от батареи, Быстрый — быстрее отклик и выше частоты",
-            "Quiet runs cooler and longer on battery, Fast responds quicker with higher clocks",
-            "安静更凉爽、续航更长；快速响应更快、频率更高",
-        )),
-    );
-    for (ac, title) in [
-        (true, t("От сети", "Plugged in", "接通电源")),
-        (false, t("От батареи", "On battery", "使用电池")),
-    ] {
-        menu.add_item(title, None, false, false, None);
-        let current = chosen(ac);
-        let mut seg = menu.add_container("", "segment");
-        let key = if ac { "Ac" } else { "Dc" };
-        let options: [(Option<Profile>, &'static str); 4] = [
-            (None, t("Windows", "Windows", "Windows")),
-            (Some(Profile::Quiet), t("Тихий", "Quiet", "安静")),
-            (Some(Profile::Balanced), t("Баланс", "Balanced", "平衡")),
-            (Some(Profile::Performance), t("Быстрый", "Fast", "快速")),
-        ];
-        for (profile, label) in options {
-            seg.add_command_ex(
-                label,
-                Some(Box::new(move || {
-                    let previous = settings::cpu_profile(key);
-                    settings::set_cpu_profile(key, profile.map(|p| p as u32));
-                    if !apply() {
-                        // The panel must show what is in effect, not a choice Windows refused.
-                        settings::set_cpu_profile(key, previous);
-                        let _ = apply();
-                        show_error_box(t(
-                            "Windows не дала изменить схему питания",
-                            "Windows refused to change the power scheme",
-                            "Windows 拒绝更改电源计划",
-                        ));
-                        return;
-                    }
-                    let icon = match profile {
-                        Some(Profile::Performance) => Icon::Performance,
-                        Some(Profile::Quiet) => Icon::Normal,
-                        _ => Icon::Balanced,
-                    };
-                    let source = if ac { t("От сети", "Plugged in", "接通电源") } else { t("От батареи", "On battery", "使用电池") };
-                    crate::osd::show(icon, &format!("{source}: {label}"), None);
-                })),
-                None, None, Some("pill"), true, current == profile,
-            );
-        }
+fn build_power_profile_section(menu: &mut SubMenu<'_>) {
+    let source = power::current_source();
+    let source_label = match source {
+        Some(true) => t("От сети", "Plugged in", "接通电源"),
+        Some(false) => t("От батареи", "On battery", "使用电池"),
+        None => t("Источник питания неизвестен", "Unknown power source", "电源未知"),
+    };
+    let applied = power::applied();
+    let help = applied.map(|status| format!("{source_label} · {}", status.reason.label()))
+        .unwrap_or_else(|| format!("{source_label} · {}", t(
+            "Выбор связывает Windows, процессор и режим HONOR",
+            "Selecting a profile links Windows, the processor and HONOR mode",
+            "选择配置会联动 Windows、处理器与 HONOR 模式",
+        )));
+    menu.add_item(t("Профиль питания", "Power profile", "电源配置"), None, false, false, Some(&help));
+    let current = applied.map(|s| s.profile).or_else(|| source.and_then(power::saved_or_current));
+    let mut segment = menu.add_container("", "segment");
+    for profile in power::Profile::ALL {
+        segment.add_command_ex(
+            profile.label(),
+            Some(Box::new(move || match power::choose(profile) {
+                Ok(status) => show_power_result(status),
+                Err(err) => show_error_box(&err),
+            })),
+            None, None, Some("pill"), source.is_some(), current == Some(profile),
+        );
+    }
+    if let Some(status) = applied {
+        menu.add_item(
+            t("Применённые параметры", "Applied settings", "已应用的设置"),
+            None, false, false, Some(&status.detail()),
+        );
+    }
+}
+
+fn show_power_result(status: power::Applied) {
+    if status.warning().is_some() {
+        show_info_box(&status.detail());
+    } else {
+        crate::osd::show(status.profile.icon(), status.profile.label(), None);
     }
 }
 
 fn build_presets_section(menu: &mut SubMenu<'_>) {
     use crate::presets::{BACKLIGHT, BRIGHTNESS, MODE, REFRESH};
+    let linked = power::linked();
     menu.add_item(
         t("При смене питания", "When the charger changes", "电源切换时"),
         None, false, false, None,
@@ -810,11 +767,11 @@ fn build_presets_section(menu: &mut SubMenu<'_>) {
     menu.add_command_ex(
         t("Пресеты питания", "Power presets", "电源预设"),
         Some(Box::new(move || settings::set_preset_enabled(!enabled))),
-        Some(t(
-            "Сами меняют режим, подсветку и яркость при подключении и отключении зарядки",
-            "Switch mode, backlight and brightness when you plug in or unplug",
-            "插拔电源时自动切换模式、背光和亮度",
-        )),
+        Some(if linked {
+            t("Меняют подсветку, яркость и частоту при смене питания", "Adjust backlight, brightness and refresh rate when the power source changes", "切换电源时调整背光、亮度和刷新率")
+        } else {
+            t("Меняют режим Windows, подсветку, яркость и частоту при смене питания", "Adjust Windows power mode, backlight, brightness and refresh rate when the power source changes", "切换电源时调整 Windows 电源模式、背光、亮度和刷新率")
+        }),
         None, Some("switch"), true, enabled,
     );
     if !enabled {
@@ -822,7 +779,7 @@ fn build_presets_section(menu: &mut SubMenu<'_>) {
     }
     let keep = t("Не менять", "Keep", "不变");
     let owned = |list: &[(u32, &str)]| list.iter().map(|(id, l)| (*id, l.to_string())).collect::<Vec<_>>();
-    let modes = owned(&[(1, t("Экономия", "Efficiency", "能效")), (2, t("Баланс", "Balanced", "平衡")), (3, t("Производительность", "Performance", "性能"))]);
+    let modes: Vec<_> = power::Profile::ALL.into_iter().map(|profile| (profile as u32, profile.label().to_string())).collect();
     let lights = owned(&[(1, t("Выкл.", "Off", "关闭")), (2, t("Слабая", "Weak", "弱")), (3, t("Сильная", "Strong", "强"))]);
     let screens = owned(&[(31, "30%"), (51, "50%"), (71, "70%"), (101, "100%")]);
     let hz_label = t("Гц", "Hz", "赫兹");
@@ -846,7 +803,11 @@ fn build_presets_section(menu: &mut SubMenu<'_>) {
         let summary = parts.join(" · ");
         let mut page = menu.add_submenu_ex(title, Some(&summary), None, Some("preset"));
         let mut groups = vec![
-            (t("Режим питания Windows", "Windows power mode", "Windows 电源模式"), MODE, &modes),
+            (if linked {
+                t("Профиль для кнопки «Применить сейчас»", "Profile for Apply now", "立即应用时的电源配置")
+            } else {
+                t("Режим питания Windows", "Windows power mode", "Windows 电源模式")
+            }, MODE, &modes),
             (t("Подсветка клавиатуры", "Keyboard backlight", "键盘背光"), BACKLIGHT, &lights),
             (t("Яркость экрана", "Display brightness", "屏幕亮度"), BRIGHTNESS, &screens),
         ];
@@ -873,8 +834,20 @@ fn build_presets_section(menu: &mut SubMenu<'_>) {
         page.add_separator();
         page.add_command_ex(
             t("Применить сейчас", "Apply now", "立即应用"),
-            Some(Box::new(move || crate::presets::apply(key))),
-            Some(t("Проверить пресет, не меняя зарядку", "Try the preset without unplugging", "无需插拔即可试用")),
+            Some(Box::new(move || match crate::presets::apply_now(key) {
+                Ok(Some(status)) => show_power_result(status),
+                Ok(None) => show_info_box(if power::current_source() == Some(on_ac) {
+                    t("Пресет применён.", "Preset applied.", "预设已应用。")
+                } else {
+                    t("Пресет сохранён для этого источника питания.", "Preset saved for this power source.", "预设已保存到此电源。")
+                }),
+                Err(err) => show_error_box(&err),
+            })),
+            Some(t(
+                "Яркость, подсветка и частота меняются только для активного источника питания",
+                "Brightness, backlight and refresh rate apply only for the active power source",
+                "亮度、背光和刷新率仅应用到当前电源",
+            )),
             None, Some("card"), true, false,
         );
     }
@@ -1022,81 +995,22 @@ fn build_battery_section(menu: &mut SubMenu<'_>) {
     );
 }
 
-fn build_performance_section(menu: &mut SubMenu<'_>, on_mode_changed: Arc<dyn Fn() + Send + Sync>) {
-    menu.add_item(
-        t("Режим HONOR", "HONOR mode", "HONOR 模式"),
-        None,
-        false,
-        false,
-        None,
-    );
-    if settings::hunter_mode_active() {
-        menu.add_command_ex(
-            t("Режим HUNTER активен", "HUNTER mode active", "HUNTER 模式已启用"),
-            None,
-            Some(t(
-                "Игровой режим ноутбука. Пока он включён, профиль HONOR не меняется.",
-                "The laptop's gaming mode. While it is on, the HONOR profile does not change.",
-                "笔记本的游戏模式。开启期间 HONOR 模式不会改变。",
-            )),
-            Some("HUNTER"),
-            Some("banner"),
-            false,
-            true,
-        );
-        return;
-    }
-
-    let active = settings::performance_mode_active();
-    menu.add_command_ex(
-        t("Производительный HONOR", "HONOR Performance", "HONOR 高性能"),
-        Some(Box::new(move || {
-            if settings::hunter_mode_active() {
-                return;
-            }
-            let target = !settings::performance_mode_active();
-            if target && let Err(reason) = can_enable_performance_mode() {
-                show_info_box(&reason);
-                return;
-            }
-            match apply_power_unlock_and_save(target) {
-                Ok(()) => {
-                    on_mode_changed();
-                    let text = if target {
-                        t("Производительный HONOR", "HONOR Performance", "HONOR 高性能")
-                    } else {
-                        t("Обычный HONOR", "HONOR Standard", "HONOR 标准")
-                    };
-                    crate::osd::show(if target { Icon::Performance } else { Icon::Balanced }, text, None);
-                }
-                Err(err) => {
-                    crate::log::error_with("Could not change performance mode", &err);
-                    show_error_box(&err.to_string());
-                }
-            }
-        })),
-        Some(t(
-            "Только от сети и при заряде от 20%",
-            "Only on the charger with at least 20% battery",
-            "需接通电源且电量不低于 20%",
-        )),
-        None,
-        Some("switch"),
-        true,
-        active,
-    );
-}
-
-/// Drivers → Device check: devices with a problem and one-click repairs (`hw/devices.rs`).
+/// Drivers → Device check: outcomes already collected by the on-demand diagnostic worker.
 fn build_device_check(menu: &mut SubMenu<'_>) {
+    use crate::hw::device_check::{self, Group, Operation, Status, TOTAL_CHECKS};
     use crate::hw::devices::{self, Radio};
-    let problems = devices::problems();
-    let summary = if problems.is_empty() {
-        t("Все устройства работают", "All devices are working", "所有设备工作正常").to_string()
-    } else {
-        format!("{}: {}", t("Устройств с ошибками", "Devices with a problem", "异常设备"), problems.len())
+    let report = device_check::snapshot();
+    let problem_count = report.problems.len() + report.checks.iter().filter(|check| check.outcome.status == Status::Problem).count();
+    let summary = match report.active {
+        Some(Operation::Scan) => format!("{} {}/{TOTAL_CHECKS}", t("Проверка", "Checking", "正在检查"), report.checks.len()),
+        Some(Operation::Internet) => t("Проверка интернета", "Checking internet access", "正在检查互联网连接").to_string(),
+        None if report.cancelled => t("Проверка отменена", "Check cancelled", "检查已取消").to_string(),
+        None if problem_count > 0 => format!("{} {problem_count}", t("Результатов с проблемами", "Results with problems", "发现问题的结果")),
+        None if report.finished_at.is_some() => t("Есть результаты проверки", "Results are available", "已有检查结果").to_string(),
+        None => t("Проверка ещё не запущена", "Check has not run yet", "尚未运行检查").to_string(),
     };
-    let badge = (!problems.is_empty()).then(|| problems.len().to_string());
+    let badge = (problem_count != 0).then(|| problem_count.to_string());
+    let idle = report.active.is_none();
     menu.add_separator();
     let mut page = menu.add_submenu_ex(
         t("Проверка устройств", "Device check", "设备检查"),
@@ -1104,39 +1018,65 @@ fn build_device_check(menu: &mut SubMenu<'_>) {
         badge.as_deref(),
         Some("collection"),
     );
-    if problems.is_empty() {
-        page.add_command_ex(
-            t("Ошибок не найдено", "No problems found", "未发现问题"),
-            None,
-            Some(t(
-                "Windows не сообщает о сбоях ни одного устройства",
-                "Windows reports no device with a problem",
-                "Windows 未报告任何设备故障",
-            )),
-            None,
-            Some("banner"),
-            false,
+    if report.active == Some(Operation::Scan) {
+        page.add_command(
+            if report.cancelled {
+                t("Отменяем проверку…", "Cancelling…", "正在取消检查…")
+            } else {
+                t("Отменить проверку", "Cancel check", "取消检查")
+            },
+            Some(Box::new(device_check::cancel)),
+            Some(&format!("{}/{TOTAL_CHECKS}", report.checks.len())),
+            Some("card"),
+            !report.cancelled,
             false,
         );
     } else {
+        page.add_command(
+            t("Запустить проверку", "Run check", "运行检查"),
+            Some(Box::new(|| {
+                if !device_check::begin(Operation::Scan) {
+                    show_error_box(t("Не удалось запустить проверку.", "Could not start the check.", "无法开始检查。"));
+                }
+            })),
+            Some(t("Оборудование и параметры Windows", "Hardware and Windows settings", "硬件和 Windows 设置")),
+            Some("cta"), idle, false,
+        );
+    }
+    if let Some((hour, minute, second)) = report.finished_at {
+        let time = format!("{hour:02}:{minute:02}:{second:02}");
+        page.add_item(
+            t("Последняя проверка", "Last check", "上次检查"),
+            None, false, false, Some(&time),
+        );
+    }
+    if let Some(status) = report.pnp {
+        let help = match status {
+            Status::Passed => t("Windows не сообщила о проблемах", "Windows reported no device problems", "Windows 未报告设备问题"),
+            Status::Problem => t("Откройте устройство для перезапуска или отката драйвера", "Open a device to restart it or roll back its driver", "打开设备以重新启动或回退驱动"),
+            _ => t("Windows не вернула статус всех устройств", "Windows did not return the status of every device", "Windows 未返回所有设备的状态"),
+        };
+        page.add_command_ex(t("Диспетчер устройств", "Device Manager", "设备管理器"), None,
+            Some(&format!("{} · {help}", status.label())), None, Some("banner"), false, false);
+    }
+    if !report.problems.is_empty() {
         page.add_item(
             t("Устройства с ошибками", "Devices with a problem", "异常设备"),
-            None, false, false,
-            Some(t("Откройте устройство: перезапуск или откат драйвера", "Open a device to restart it or roll back its driver", "打开设备以重新启动或回退驱动")),
+            None, false, false, None,
         );
-        for device in problems {
+        for device in &report.problems {
             let help = format!("{} {}: {}", t("Код", "Code", "代码"), device.problem, devices::problem_text(device.problem));
             let mut dev = page.add_submenu_ex(&device.name, Some(&help), None, Some("driver"));
+            let repairable = idle && !device.instance_id.is_empty();
             let (id, name) = (device.instance_id.clone(), device.name.clone());
             dev.add_command_ex(
                 t("Перезапустить устройство", "Restart the device", "重启设备"),
                 Some(Box::new(move || {
                     let result = devices::restart_device(&id);
-                    devices::invalidate();
                     report_repair(&name, result);
                 })),
                 Some(t("Как отключить и включить в диспетчере устройств", "Like disable and enable in Device Manager", "相当于在设备管理器中禁用再启用")),
-                None, Some("card"), true, false,
+                None, Some("card"), repairable, false,
             );
             let (id, name) = (device.instance_id.clone(), device.name.clone());
             let key = format!("rollback/{id}");
@@ -1148,7 +1088,6 @@ fn build_device_check(menu: &mut SubMenu<'_>) {
                         return;
                     }
                     let result = devices::rollback_driver(&id);
-                    devices::invalidate();
                     report_repair(&name, result);
                 })),
                 Some(if armed {
@@ -1156,11 +1095,54 @@ fn build_device_check(menu: &mut SubMenu<'_>) {
                 } else {
                     t("Вернуть драйвер, стоявший до последнего обновления", "Go back to the driver used before the last update", "恢复上次更新前的驱动程序")
                 }),
-                None, Some("danger"), true, false,
+                None, Some("danger"), repairable, false,
             );
         }
     }
-    if let Some(ssd) = crate::hw::storage::read() {
+    for group in Group::ALL {
+        let checks: Vec<_> = report.checks.iter().filter(|check| check.group == group).collect();
+        if checks.is_empty() {
+            continue;
+        }
+        let count = checks.len().to_string();
+        let mut group_page = page.add_submenu_ex(group.label(), None, Some(&count), Some("collection"));
+        for check in checks {
+            let status = check.outcome.status;
+            let status_text = status.label();
+            let help = check.outcome.note.as_deref().map_or_else(|| status_text.to_string(), |note| format!("{status_text} · {note}"));
+            group_page.add_item(check.title, None, false, false, Some(&help));
+            if let Some(manual) = check.manual {
+                if report.manual == Some(manual) {
+                    group_page.add_item(manual.prompt(), None, false, false, None);
+                    for (label, passed) in [
+                        (t("Да", "Yes", "是"), true),
+                        (t("Нет", "No", "否"), false),
+                    ] {
+                        group_page.add_command(label, Some(Box::new(move || device_check::confirm(manual, passed))), None, Some("card"), idle, false);
+                    }
+                } else if status == Status::Interactive {
+                    group_page.add_command(
+                        t("Запустить тест", "Start test", "运行测试"),
+                        Some(Box::new(move || device_check::start_manual(manual))),
+                        Some(manual.prompt()), Some("card"), idle, false,
+                    );
+                }
+            }
+        }
+    }
+    page.add_separator();
+    let internet = report.internet.as_ref().and_then(|outcome| outcome.note.as_deref());
+    page.add_command(
+        t("Проверить интернет", "Check internet access", "检查互联网连接"),
+        Some(Box::new(|| {
+            if !device_check::begin(Operation::Internet) {
+                show_error_box(t("Не удалось запустить проверку.", "Could not start the check.", "无法开始检查。"));
+            }
+        })),
+        internet.or(Some(t("Отдельный HTTPS-запрос к Microsoft", "Separate HTTPS request to Microsoft", "向 Microsoft 发送单独的 HTTPS 请求"))),
+        Some("card"), idle, false,
+    );
+    if let Some(ssd) = report.ssd {
         page.add_separator();
         let state = if ssd.warning || ssd.media_errors > 0 || ssd.used_percent >= 90 {
             t("Требует внимания", "Needs attention", "需要注意")
@@ -1171,8 +1153,9 @@ fn build_device_check(menu: &mut SubMenu<'_>) {
             &format!("SSD · {}", ssd.model),
             None, false, false,
             Some(&format!(
-                "{state} · {} {}% · {} °C · {:.1} {} · {} {}",
-                t("износ", "wear", "磨损"), ssd.used_percent, ssd.temperature_c, ssd.written_tb,
+                "{state} · {} {}% · {} · {:.1} {} · {} {}",
+                t("износ", "wear", "磨损"), ssd.used_percent,
+                ssd.temperature_c.map_or_else(|| "—".to_string(), |temperature| format!("{temperature} °C")), ssd.written_tb,
                 t("ТБ записано", "TB written", "TB 已写入"), ssd.power_on_hours, t("ч работы", "h on", "小时通电"),
             )),
         );
@@ -1201,13 +1184,12 @@ fn build_device_check(menu: &mut SubMenu<'_>) {
                     return;
                 }
                 let result = devices::restart_radio(radio);
-                devices::invalidate();
                 report_repair(label, result);
             })),
             Some(if armed { t("Нажмите ещё раз: связь пропадёт на несколько секунд", "Click again: the connection drops for a few seconds", "再次点击：连接将中断几秒") } else { help }),
             None,
             None,
-            true,
+            idle,
             false,
         );
     }
@@ -1223,7 +1205,7 @@ fn build_device_check(menu: &mut SubMenu<'_>) {
         None, Some("card"), true, false,
     );
     row.add_command_ex(
-        t("Журнал событий", "Event log", "事件日志"),
+        t("Журнал GrandHonor", "GrandHonor log", "GrandHonor 日志"),
         Some(Box::new(|| crate::unelevated::open(&crate::log::log_path().display().to_string()))),
         Some(t("Что GrandHonor делал и какие были ошибки", "What GrandHonor did and any errors", "GrandHonor 的操作与错误")),
         None, Some("card"), true, false,
@@ -1232,7 +1214,6 @@ fn build_device_check(menu: &mut SubMenu<'_>) {
         t("Найти новое оборудование", "Scan for hardware changes", "扫描硬件改动"),
         Some(Box::new(|| {
             let ok = devices::rescan();
-            devices::invalidate();
             if ok {
                 crate::osd::show(Icon::Display, t("Оборудование обновлено", "Hardware rescanned", "已重新扫描硬件"), None);
             } else {
@@ -1246,7 +1227,7 @@ fn build_device_check(menu: &mut SubMenu<'_>) {
         )),
         None,
         None,
-        true,
+        idle,
         false,
     );
 }
@@ -1266,12 +1247,254 @@ fn report_repair(name: &str, result: Result<bool, String>) {
     }
 }
 
+fn build_hdr_section(menu: &mut SubMenu<'_>) {
+    use crate::hw::display_hdr::{self, Policy};
+    let Some(state) = display_hdr::status().filter(|state| state.supported) else { return };
+    let mut page = menu.add_submenu_ex(
+        "HDR",
+        Some(if state.active {
+            t("Активен", "Active", "已启用")
+        } else if state.enabled {
+            t("Включён, но не активен", "On, currently inactive", "已打开，当前未生效")
+        } else {
+            t("Выключен", "Off", "已关闭")
+        }),
+        None, Some("collection"),
+    );
+    page.add_command_ex(
+        t("Использовать HDR", "Use HDR", "使用 HDR"),
+        Some(Box::new(move || {
+            if let Err(err) = display_hdr::set_manual(!state.enabled) {
+                show_error_box(&err);
+            }
+        })),
+        Some(if state.limited {
+            t("Текущий режим ограничен Windows", "Windows limits the current mode", "当前模式受 Windows 限制")
+        } else {
+            t("На встроенном экране", "On the built-in display", "用于内置显示屏")
+        }),
+        None, Some("switch"), state.enabled || !state.limited, state.enabled,
+    );
+    page.add_separator();
+    page.add_item(t("Включать автоматически", "Turn on automatically", "自动启用"), None, false, false, None);
+    let selected = display_hdr::policy();
+    let mut bar = page.add_container("", "segment");
+    for (policy, label) in [
+        (Policy::Manual, t("Вручную", "Manually", "手动")),
+        (Policy::Ac, t("От сети", "On AC", "接通电源")),
+        (Policy::Programs, t("В программах", "In apps", "在应用中")),
+    ] {
+        bar.add_command_ex(label, Some(Box::new(move || display_hdr::set_policy(policy))), None, None, Some("pill"), true, selected == policy);
+    }
+    if selected == Policy::Programs {
+        let apps = settings::hdr_programs();
+        for app in &apps {
+            let rest = apps.iter().filter(|current| *current != app).cloned().collect::<Vec<_>>();
+            page.add_command_ex(
+                app,
+                Some(Box::new(move || {
+                    if settings::set_hdr_programs(&rest) {
+                        crate::hw::app_profiles::settings_changed();
+                    } else {
+                        show_error_box(t("Не удалось сохранить список программ.", "Could not save the app list.", "无法保存应用列表。"));
+                    }
+                })),
+                None, Some(t("Убрать", "Remove", "移除")), Some("card"), true, false,
+            );
+        }
+        page.add_command_ex(
+            t("Добавить программу…", "Add an app…", "添加应用…"),
+            Some(Box::new(move || {
+                match crate::drivers::transfer::open_file_dialog(
+                    t("Программа для HDR", "App for HDR", "使用 HDR 的应用"),
+                    t("Программы", "Programs", "程序"),
+                    "*.exe",
+                ) {
+                    Ok(Some(path)) => {
+                        let Some(name) = path.file_name().and_then(|name| name.to_str()).map(str::to_ascii_lowercase) else { return };
+                        let mut list = settings::hdr_programs();
+                        if !list.contains(&name) {
+                            list.push(name);
+                            if settings::set_hdr_programs(&list) {
+                                crate::hw::app_profiles::settings_changed();
+                            } else {
+                                show_error_box(t("Не удалось сохранить список программ.", "Could not save the app list.", "无法保存应用列表。"));
+                            }
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(err) => show_error_box(&err),
+                }
+            })),
+            None, None, Some("card"), true, false,
+        );
+    }
+    page.add_separator();
+    page.add_item(t("Калибровка HDR", "HDR calibration", "HDR 校准"), None, false, false, None);
+    let (profiles, current) = display_hdr::calibration_profiles();
+    for profile in profiles {
+        let chosen = current.as_ref().is_some_and(|name| name.eq_ignore_ascii_case(&profile));
+        let name = std::path::Path::new(&profile).file_stem().and_then(|name| name.to_str()).unwrap_or(&profile).to_string();
+        page.add_command_ex(
+            &name,
+            Some(Box::new(move || {
+                if let Err(err) = display_hdr::select_calibration(&profile) {
+                    show_error_box(&err);
+                }
+            })),
+            None, chosen.then(|| t("Активен", "Active", "当前")), Some("card"), true, chosen,
+        );
+    }
+    page.add_command_ex(
+        t("Открыть параметры HDR Windows", "Open Windows HDR settings", "打开 Windows HDR 设置"),
+        Some(Box::new(|| crate::unelevated::open("ms-settings:display-hdr"))),
+        Some(t("Калибровка, яркость SDR и Auto HDR", "Calibration, SDR brightness and Auto HDR", "校准、SDR 亮度和自动 HDR")),
+        None, Some("card"), true, false,
+    );
+}
+
+fn build_oled_section(menu: &mut SubMenu<'_>, update_tray: Arc<dyn Fn() + Send + Sync>) {
+    use crate::hw::display;
+    let mut page = menu.add_submenu_ex(
+        t("Защита экрана", "Screen care", "屏幕保护"),
+        Some(t("Яркость, простой и панель задач", "Brightness, idle and taskbar", "亮度、空闲和任务栏")),
+        None, Some("collection"),
+    );
+    if display::built_in_active() {
+        let brightness = crate::hw::wmi::display_brightness();
+        let summary = brightness.map(|value| format!("{value}%"));
+        page.add_item(t("Яркость встроенного экрана", "Built-in display brightness", "内置屏幕亮度"), None, false, false, summary.as_deref());
+        if brightness.is_some() {
+            let mut options = page.add_container("", "slider");
+            for value in 0..=100 {
+                let label = if value == 0 { "0%" } else if value == 100 { "100%" } else { "" };
+                options.add_command_ex(label, Some(Box::new(move || {
+                    if !crate::hw::wmi::set_wmi_brightness(value) {
+                        show_error_box(t("Не удалось изменить яркость.", "Could not change brightness.", "无法更改亮度。"));
+                    }
+                })), None, None, None, true, brightness == Some(value));
+            }
+        }
+    }
+    if let Some((ac, dc)) = display::display_timeouts() {
+        page.add_separator();
+        page.add_item(t("Отключать экран при простое", "Turn off display when idle", "空闲时关闭屏幕"), None, false, false,
+            Some(t("Для текущей схемы питания Windows", "For the current Windows power plan", "适用于当前 Windows 电源计划")));
+        for (on_ac, current) in [(true, ac), (false, dc)] {
+            let Some(current) = current else { continue };
+            let current_label = timeout_label(current);
+            let mut options = page.add_submenu_ex(
+                if on_ac { t("От сети", "On AC", "接通电源") } else { t("От батареи", "On battery", "使用电池") },
+                None, Some(&current_label), Some("collection"),
+            );
+            let mut times = vec![60, 120, 180, 300, 600, 900];
+            if current != 0 && !times.contains(&current) {
+                times.push(current);
+                times.sort_unstable();
+            }
+            times.push(0);
+            for seconds in times {
+                options.add_command_ex(&timeout_label(seconds), Some(Box::new(move || {
+                    if !display::set_display_timeout(on_ac, seconds) {
+                        show_error_box(t("Не удалось изменить время отключения экрана.", "Could not change the display timeout.", "无法更改屏幕关闭时间。"));
+                    }
+                })), None, None, Some("card"), true, current == seconds);
+            }
+        }
+    }
+    page.add_separator();
+    page.add_command_ex(
+        t("Параметры панели задач", "Taskbar settings", "任务栏设置"),
+        Some(Box::new(|| crate::unelevated::open("ms-settings:taskbar"))),
+        Some(if display::taskbar_auto_hidden() {
+            t("Автоскрытие включено", "Auto-hide is on", "自动隐藏已启用")
+        } else {
+            t("Панель задач не скрывается", "The taskbar does not auto-hide", "任务栏不会自动隐藏")
+        }),
+        None, Some("card"), true, false,
+    );
+    let monochrome = settings::monochrome_tray();
+    page.add_command_ex(
+        t("Монохромный значок GrandHonor", "Monochrome GrandHonor icon", "GrandHonor 单色图标"),
+        Some(Box::new(move || {
+            settings::set_monochrome_tray(!monochrome);
+            update_tray();
+        })),
+        Some(t("Без цветного ободка и с прозрачным фоном", "Transparent background without the accent outline", "透明背景，无强调色描边")),
+        None, Some("switch"), true, monochrome,
+    );
+    page.add_command_ex(
+        t("Монохромный значок ярлыка…", "Monochrome shortcut icon…", "快捷方式单色图标…"),
+        Some(Box::new(|| {
+            let path = std::env::current_exe().ok().map(|path| path.with_file_name("GrandHonor.Panel.exe"));
+            let Some(path) = path.filter(|path| path.is_file()) else {
+                show_error_box(t("Панель GrandHonor не найдена.", "The GrandHonor panel was not found.", "找不到 GrandHonor 控制面板。"));
+                return;
+            };
+            if let Some(expected) = option_env!("GRANDHONOR_PANEL_HASH").filter(|hash| !hash.is_empty())
+                && !crate::drivers::trust::compute_sha256_hex(&path).is_ok_and(|hash| hash.eq_ignore_ascii_case(expected))
+            {
+                show_error_box(t("Файл панели не соответствует сборке.", "The panel file does not match this build.", "控制面板文件与此版本不匹配。"));
+                return;
+            }
+            crate::unelevated::open_with(
+                &path.to_string_lossy(),
+                &format!("--shortcut-icon {}", grandhonor_core::locale::language().code()),
+            );
+        })),
+        Some(t("Выберите ярлык повторно, чтобы вернуть исходный значок", "Choose the shortcut again to restore its original icon", "再次选择快捷方式以恢复原图标")),
+        None, Some("card"), true, false,
+    );
+}
+
+fn build_tray_metrics_section(menu: &mut SubMenu<'_>, update: Arc<dyn Fn() + Send + Sync>) {
+    let selected = settings::tray_metrics();
+    let mut page = menu.add_submenu_ex(
+        t("Показания в трее", "Tray readings", "托盘读数"),
+        Some(if selected == 0 { t("Выключены", "Off", "已关闭") } else { t("Включены", "On", "已开启") }),
+        None, Some("collection"),
+    );
+    page.add_item(
+        t("Значки датчиков", "Sensor icons", "传感器图标"),
+        None, false, false, Some(t("Выберите значки и закрепите их в панели задач Windows", "Choose icons and pin them to the Windows taskbar", "选择图标并将其固定到 Windows 任务栏")),
+    );
+    for (index, metric) in crate::tray_metrics::LABELS.iter().enumerate() {
+        let bit = 1 << index;
+        let update = update.clone();
+        page.add_command_ex(
+            t(metric.0, metric.1, metric.2),
+            Some(Box::new(move || {
+                settings::toggle_tray_metric(bit);
+                update();
+            })),
+            None, None, Some("switch"), true, selected & bit != 0,
+        );
+    }
+}
+
+fn timeout_label(seconds: u32) -> String {
+    match seconds {
+        0 => t("Никогда", "Never", "从不").into(),
+        n if n % 60 == 0 => format!("{} {}", n / 60, t("мин", "min", "分钟")),
+        n => format!("{n} {}", t("с", "s", "秒")),
+    }
+}
+
 fn build_display_filter_section(menu: &mut SubMenu<'_>) {
     use settings::{ColorProfile, DisplayFilter};
     menu.add_separator();
+    if crate::hw::display_hdr::any_hdr_active() {
+        menu.add_item(
+            t("Защита зрения", "Eye comfort", "护眼"),
+            None, false, false,
+            Some(t("Цветовые фильтры приостановлены, пока включён HDR", "Colour filters are paused while HDR is on", "HDR 开启时暂停色彩滤镜")),
+        );
+        build_eye_breaks_section(menu);
+        return;
+    }
     // sRGB and P3 are computed from the measured primaries of the ZQC-P panel: on another
     // model they would shift colours, so the choice is offered only there.
-    if crate::hw::display_filter::profile_supported() {
+    if crate::hw::display_filter::profile_supported() && crate::hw::display::built_in_only() {
         let profile = settings::color_profile();
         let profile_help = match profile {
             ColorProfile::Native => t(
@@ -1367,6 +1590,10 @@ fn build_display_filter_section(menu: &mut SubMenu<'_>) {
             );
         }
     }
+    build_eye_breaks_section(menu);
+}
+
+fn build_eye_breaks_section(menu: &mut SubMenu<'_>) {
     menu.add_separator();
     let every = settings::break_reminder_minutes();
     menu.add_item(
@@ -1436,10 +1663,13 @@ fn build_keyboard_section(menu: &mut SubMenu<'_>, schedule: Arc<BacklightSchedul
     }
 
     menu.add_separator();
-    menu.add_item(t("Таймаут отключения", "Idle timeout", "闲置超时"), None, false, false, None);
     let current_timeout = settings::keyboard_backlight_timeout();
-    // The same seven choices as HONOR PC Manager (settingMenu_keyboard.xml: 5, 10, 15, 30, 60,
-    // 300 s and never), all sent with the firmware's idle-timeout command.
+    let current_label = timeout_label(u32::from(current_timeout));
+    let mut timeout_menu = menu.add_submenu_ex(
+        t("Отключать подсветку через", "Turn off backlight after", "背光关闭时间"),
+        None, Some(&current_label), Some("collection"),
+    );
+    // The same seven choices as HONOR PC Manager (5, 10, 15, 30, 60, 300 s and never), all sent with the firmware's idle-timeout command.
     let timeouts: [(u16, &str); 7] = [
         (0, t("Никогда", "Never", "从不")),
         (5, t("5 с", "5 s", "5 秒")),
@@ -1449,9 +1679,8 @@ fn build_keyboard_section(menu: &mut SubMenu<'_>, schedule: Arc<BacklightSchedul
         (60, t("1 мин", "1 min", "1 分钟")),
         (300, t("5 мин", "5 min", "5 分钟")),
     ];
-    let mut timeout_seg = menu.add_container("", "segment");
     for (secs, label) in timeouts {
-        timeout_seg.add_command_ex(
+        timeout_menu.add_command_ex(
             label,
             Some(Box::new(move || {
                 match set_backlight_timeout(secs) {
@@ -1467,7 +1696,7 @@ fn build_keyboard_section(menu: &mut SubMenu<'_>, schedule: Arc<BacklightSchedul
             })),
             None,
             None,
-            Some("pill"),
+            Some("card"),
             true,
             current_timeout == secs,
         );
@@ -1600,17 +1829,29 @@ fn build_keys_section(menu: &mut SubMenu<'_>) {
             (Action::App, Some(name)) => name.clone(),
             _ => current.label().to_string(),
         };
-        let mut page = menu.add_submenu_ex(title, None, Some(&badge), Some("keyboard"));
+        let yoyo_help = (key == hotkeys::YOYO).then(|| t(
+            "Назначение действует на обычную F11, в том числе на внешней клавиатуре",
+            "An assignment also remaps regular F11, including on an external keyboard",
+            "分配操作也会重新映射普通 F11，包括外接键盘上的 F11",
+        ));
+        let mut page = menu.add_submenu_ex(title, yoyo_help, Some(&badge), Some("keyboard"));
         for choice in Action::ALL {
-            let help = match choice {
+            let confirm_yoyo = key == hotkeys::YOYO && current == Action::Default && choice != Action::Default;
+            let confirmation = format!("yoyo/{}", choice.code());
+            let help = if confirm_yoyo && is_armed(&confirmation) {
+                Some(t("Нажмите ещё раз, чтобы переназначить F11", "Click again to remap F11", "再次点击以重新映射 F11"))
+            } else { match choice {
                 Action::Default if key == hotkeys::COPILOT => Some(t("Открывает Copilot или то, что выбрано в Параметрах Windows", "Opens Copilot or what Windows Settings say", "打开 Copilot 或 Windows 设置中所选项")),
                 Action::Default => Some(t("Обычная клавиша F11 (полный экран в браузере)", "A normal F11 key (full screen in browsers)", "普通 F11 键（浏览器全屏）")),
                 Action::App => app_path.as_deref().or(Some(t("Выбрать программу…", "Choose a program…", "选择程序…"))),
                 _ => None,
-            };
+            }};
             page.add_command_ex(
                 choice.label(),
                 Some(Box::new(move || {
+                    if confirm_yoyo && !confirmed(&confirmation) {
+                        return;
+                    }
                     if choice == Action::App {
                         match crate::drivers::transfer::open_file_dialog(
                             t("Программа для клавиши", "Program for the key", "按键启动的程序"),
@@ -1640,7 +1881,43 @@ fn build_keys_section(menu: &mut SubMenu<'_>) {
     }
 }
 
-fn build_touchpad_section(menu: &mut SubMenu<'_>) {
+fn build_media_seek_section(menu: &mut SubMenu<'_>, hwnd: isize) {
+    if !crate::hw::touchpad::input::can_seek() {
+        return;
+    }
+    let enabled = settings::media_seek_enabled();
+    let mut page = menu.add_submenu_ex(
+        t("Плавная перемотка", "Media scrubbing", "拖动媒体进度"),
+        Some(t("Ведите четырьмя пальцами влево или вправо", "Drag four fingers left or right", "四指向左或向右拖动")),
+        Some(if enabled { t("Вкл.", "On", "开") } else { t("Выкл.", "Off", "关") }),
+        Some("collection"),
+    );
+    page.add_command_ex(
+        t("Разрешить перемотку", "Enable media seeking", "启用快进和快退"),
+        Some(Box::new(move || {
+            settings::set_media_seek_enabled(!enabled);
+            crate::hw::touchpad::input::settings_changed(hwnd);
+        })),
+        Some(t("Шкала следует за пальцами. Отпустите их, чтобы перейти к выбранному моменту", "The preview follows your fingers. Lift them to seek", "预览随手指移动，抬起手指后跳转")),
+        None, Some("switch"), true, enabled,
+    );
+    page.add_item(
+        t("Назначения в Windows", "Windows gesture assignments", "Windows 手势分配"),
+        None, false, false,
+        Some(t(
+            "В дополнительных жестах Windows выберите «Ничего» для движения четырьмя пальцами влево и вправо",
+            "In Windows Advanced gestures, choose Nothing for four-finger swipes left and right",
+            "在 Windows 高级手势中将四指向左和向右滑动都设为无操作",
+        )),
+    );
+    page.add_command_ex(
+        t("Открыть настройки тачпада Windows", "Open Windows touchpad settings", "打开 Windows 触控板设置"),
+        Some(Box::new(|| crate::unelevated::open("ms-settings:devices-touchpad"))),
+        None, None, Some("card"), true, false,
+    );
+}
+
+fn build_touchpad_section(menu: &mut SubMenu<'_>, hwnd: isize) {
     menu.add_item(
         t("Тактильный отклик", "Haptic feedback", "触觉反馈强度"),
         None,
@@ -1721,6 +1998,77 @@ fn build_touchpad_section(menu: &mut SubMenu<'_>) {
             Some("switch"),
             true,
             enabled,
+        );
+    }
+
+    use crate::hw::touchpad::Gesture;
+    if Gesture::ALL.into_iter().any(Gesture::is_supported) {
+        menu.add_separator();
+        menu.add_item(t("Назначения жестов", "Gesture actions", "手势操作"), None, false, false, None);
+    }
+    let corners = [
+        (Gesture::LeftCorner, t("Нажатие в левом верхнем углу", "Press the top-left corner", "按压左上角")),
+        (Gesture::RightCorner, t("Нажатие в правом верхнем углу", "Press the top-right corner", "按压右上角")),
+        (Gesture::BottomLeft, t("Нажатие в левом нижнем углу", "Press the bottom-left corner", "按压左下角")),
+        (Gesture::BottomRight, t("Нажатие в правом нижнем углу", "Press the bottom-right corner", "按压右下角")),
+    ];
+    if corners.iter().any(|(gesture, _)| gesture.is_supported()) {
+        let mut page = menu.add_submenu_ex(
+            t("Нажатия в углах", "Corner presses", "角落按压"),
+            None, None, Some("collection"),
+        );
+        for (gesture, label) in corners {
+            add_gesture_assignment(&mut page, gesture, label, hwnd);
+        }
+    }
+    let edges = [
+        (Gesture::LeftOne, t("Слева · 1 палец", "Left · one finger", "左侧 · 单指")),
+        (Gesture::LeftTwo, t("Слева · 2 пальца", "Left · two fingers", "左侧 · 双指")),
+        (Gesture::RightOne, t("Справа · 1 палец", "Right · one finger", "右侧 · 单指")),
+        (Gesture::Inward, t("Справа · 2 пальца", "Right · two fingers", "右侧 · 双指")),
+        (Gesture::TopOne, t("Сверху · 1 палец", "Top · one finger", "顶部 · 单指")),
+        (Gesture::TopTwo, t("Сверху · 2 пальца", "Top · two fingers", "顶部 · 双指")),
+        (Gesture::BottomOne, t("Снизу · 1 палец", "Bottom · one finger", "底部 · 单指")),
+        (Gesture::BottomTwo, t("Снизу · 2 пальца", "Bottom · two fingers", "底部 · 双指")),
+    ];
+    if edges.iter().any(|(gesture, _)| gesture.is_supported()) {
+        let mut page = menu.add_submenu_ex(
+            t("Смахивания от краёв", "Swipes from edges", "边缘向内滑动"),
+            Some(t("Начните у края и проведите к центру", "Start at an edge and swipe in", "从边缘向中心滑动")),
+            None, Some("collection"),
+        );
+        for (gesture, label) in edges {
+            add_gesture_assignment(&mut page, gesture, label, hwnd);
+        }
+    }
+}
+
+fn add_gesture_assignment(menu: &mut SubMenu<'_>, gesture: crate::hw::touchpad::Gesture, label: &str, hwnd: isize) {
+    use crate::hw::touchpad::{GestureAction, assign_gesture, input};
+    if !gesture.is_supported() {
+        return;
+    }
+    let current = GestureAction::current(gesture);
+    let action_label = |action| match action {
+        GestureAction::None => t("Выключено", "Off", "关闭"),
+        GestureAction::Panel => t("Открыть GrandHonor", "Open GrandHonor", "打开 GrandHonor"),
+        GestureAction::Minimize => t("Свернуть окно", "Minimize window", "最小化窗口"),
+        GestureAction::Screenshot => t("Снимок экрана", "Screenshot", "截图"),
+    };
+    let mut page = menu.add_submenu_ex(label, None, Some(action_label(current)), Some("keyboard"));
+    for action in GestureAction::ALL {
+        page.add_command_ex(
+            action_label(action),
+            Some(Box::new(move || {
+                match assign_gesture(gesture, action) {
+                    Ok(()) => {
+                        input::settings_changed(hwnd);
+                        crate::osd::show(Icon::Touchpad, action_label(action), None);
+                    }
+                    Err(err) => show_error_box(&err),
+                }
+            })),
+            None, None, None, true, action == current,
         );
     }
 }
@@ -1812,4 +2160,157 @@ pub fn show_error_box(msg: &str) {
 
 fn show_info_box(msg: &str) {
     report(msg, false);
+}
+
+/// Display → Video in the browser: options of the GrandHonor browser extension (`BrowserVsr`,
+/// sent by the panel's native messaging host) and its install buttons (browser_vsr.rs). Shown
+/// only when this build carries the extension.
+fn build_browser_video_section(menu: &mut SubMenu<'_>) {
+    use crate::browser_vsr::{self, Browser};
+    if !browser_vsr::available() {
+        return;
+    }
+    let bits = settings::browser_vsr();
+    let on = bits & 1 != 0;
+    let npu = bits & 16 != 0;
+    let mut page = menu.add_submenu_ex(
+        t("Видео в браузере", "Video in the browser", "浏览器视频"),
+        Some(t(
+            "Нейросеть на видеокарте делает видео плавным до 60 или 120 кадров/с",
+            "A neural network on the graphics makes video smooth, up to 60 or 120 frames/s",
+            "显卡上的神经网络让视频流畅至 60 或 120 帧/秒",
+        )),
+        Some(if on { t("Вкл.", "On", "开") } else { t("Выкл.", "Off", "关") }),
+        Some("collection"),
+    );
+    page.add_command_ex(
+        t("Улучшать видео", "Enhance video", "增强视频"),
+        Some(Box::new(|| settings::toggle_browser_vsr(1))),
+        Some(t("Видео с защитой от копирования и сайты, которые запрещают обработку, остаются без изменений",
+               "Copy-protected video and sites that forbid processing stay unchanged",
+               "受版权保护的视频和禁止处理的网站保持不变")),
+        None, Some("switch"), true, on,
+    );
+    page.add_item(
+        t("Плавность", "Smoothness", "流畅度"), None, false, false,
+        Some(t("Нейросеть RIFE на видеокарте достраивает промежуточные кадры. Видео, у которого кадров уже достаточно, не обрабатывается",
+               "The RIFE neural network on the graphics adds frames in between. Video that already has enough frames is left as it is",
+               "显卡上的 RIFE 神经网络生成中间帧。帧数已足够的视频不做处理")),
+    );
+    let frames = if bits & 64 != 0 { 0 } else if bits & 512 != 0 { 120 } else { 60 };
+    let mut seg = page.add_container("", "segment");
+    for (value, label) in [(0, t("Выкл.", "Off", "关")), (60, t("До 60", "Up to 60", "至 60")), (120, t("До 120", "Up to 120", "至 120"))] {
+        let stored = match value { 0 => 64, 120 => 512, _ => 0 };
+        seg.add_command_ex(label, Some(Box::new(move || settings::set_browser_vsr_bits(64 | 512, stored))), None, None, Some("pill"), on, frames == value);
+    }
+    // (bit, title, help, the bit switches the feature off, needs the badge)
+    let mut switches: Vec<(u32, &str, Option<&str>, bool, bool)> = vec![
+        (1024, t("Экономить на батарее", "Save battery", "使用电池时节能"),
+            Some(t("Без зарядки — не больше 60 кадров/с и только для видео до 30 кадров/с",
+                   "Without the charger: at most 60 frames/s, and only for video up to 30 frames/s",
+                   "未接电源时：最多 60 帧/秒，且仅处理 30 帧/秒及以下的视频")), true, false),
+        (2, t("Плашка VSR", "VSR badge", "VSR 标记"), Some(t("В правом верхнем углу видео", "In the video's top-right corner", "显示在视频右上角")), false, false),
+        (4, t("Подробности на плашке", "Details on the badge", "在标记上显示详情"),
+            Some(t("Размеры, кадры/с и время обработки", "Sizes, frame rate and processing time", "尺寸、帧率和处理用时")), false, true),
+    ];
+    if browser_vsr::npu_model_present() {
+        switches.insert(1, (16, t("Восстановление на NPU", "Restoration on the NPU", "NPU 修复"),
+            Some(t("Опыт: видео до 480p без блоков и лесенок. Нужен WebNN в браузере, запуск 15–30 с, только от зарядки",
+                   "Experimental: video up to 480p without blocks and jaggies. Needs WebNN in the browser, starts in 15–30 s, only on the charger",
+                   "实验功能：480p 及以下视频去除色块和锯齿。需要浏览器支持 WebNN，启动需 15–30 秒，仅在接通电源时")), false, false));
+    }
+    if npu && browser_vsr::npu_model_present() {
+        switches.push((8, t("Сравнить с оригиналом", "Compare with the original", "与原始画面对比"),
+            Some(t("Слева оригинал, справа результат NPU", "Original on the left, NPU result on the right", "左侧为原始画面，右侧为 NPU 结果")), false, false));
+    }
+    for (bit, title, help, inverted, needs_badge) in switches {
+        page.add_command_ex(
+            title,
+            Some(Box::new(move || settings::toggle_browser_vsr(bit))),
+            help, None, Some("switch"), on && (!needs_badge || bits & 2 != 0), (bits & bit != 0) != inverted,
+        );
+    }
+    page.add_item(
+        t("Установка", "Installing", "安装"),
+        None, false, false,
+        Some(t(
+            "Откроются страница расширений и папка. Включите режим разработчика, нажмите «Загрузить распакованное» и выберите эту папку",
+            "The extensions page and the folder open. Turn on developer mode, click Load unpacked and choose this folder",
+            "将打开扩展页面和文件夹。开启开发者模式，点击“加载解压缩的扩展”并选择该文件夹",
+        )),
+    );
+    for browser in Browser::ALL {
+        let installed = browser.executable().is_some();
+        page.add_command_ex(
+            &format!("{} {}", t("Установить в", "Install in", "安装到"), browser.name()),
+            Some(Box::new(move || {
+                if let Err(err) = browser_vsr::install(browser) {
+                    show_error_box(&err);
+                }
+            })),
+            None, None, Some("card"), installed, false,
+        );
+    }
+}fn build_video_section(menu: &mut SubMenu<'_>) {
+    use crate::hw::video::{self, Feature, Level};
+    let features = video::supported();
+    if features.is_empty() {
+        return;
+    }
+    menu.add_separator();
+    menu.add_item(
+        t("Видео", "Video", "视频"),
+        None, false, false,
+        Some(t(
+            "Драйвер Intel улучшает видео в плеерах Windows (не в браузерах); настройки хранит сам драйвер",
+            "The Intel driver improves video in Windows players (not in browsers); it keeps these settings itself",
+            "Intel 驱动会增强 Windows 播放器中的视频（浏览器除外）；设置由驱动自行保存",
+        )),
+    );
+    let off = t("Выкл.", "Off", "关");
+    for feature in features {
+        // (title, choices: label, enabled, level, automatic)
+        let (title, choices): (&str, Vec<(&'static str, bool, u32, bool)>) = match feature {
+            Feature::Sharpness => (
+                t("Резкость", "Sharpness", "锐度"),
+                vec![(off, false, 0, false), (t("Мягкая", "Soft", "柔和"), true, 20, false), (t("Обычная", "Normal", "标准"), true, 44, false), (t("Сильная", "Strong", "强"), true, 64, false)],
+            ),
+            Feature::NoiseReduction => (
+                t("Шумоподавление", "Noise reduction", "降噪"),
+                vec![(off, false, 0, false), (t("Авто", "Auto", "自动"), true, 32, true), (t("Слабое", "Light", "轻度"), true, 16, false), (t("Сильное", "Strong", "强"), true, 48, false)],
+            ),
+            Feature::AdaptiveContrast => (
+                t("Контраст", "Contrast", "对比度"),
+                vec![(off, false, 0, false), (t("Слабый", "Light", "轻度"), true, 3, false), (t("Обычный", "Normal", "标准"), true, 5, false), (t("Сильный", "Strong", "强"), true, 9, false)],
+            ),
+            Feature::SkinTone => (
+                t("Тон кожи", "Skin tone", "肤色"),
+                vec![(off, false, 0, false), (t("Обычный", "Normal", "标准"), true, 3, false), (t("Сильный", "Strong", "强"), true, 7, false)],
+            ),
+        };
+        let current = video::get(feature);
+        // The choice nearest to what the driver applies is shown as selected.
+        let selected = current.map(|c| {
+            choices
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, (_, enabled, value, auto))| {
+                    if *enabled != c.enabled || (*auto && !c.auto) { u32::MAX } else { value.abs_diff(c.value) }
+                })
+                .map_or(0, |(i, _)| i)
+        });
+        menu.add_item(title, None, false, false, None);
+        let mut seg = menu.add_container("", "segment");
+        for (i, (label, enabled, value, auto)) in choices.into_iter().enumerate() {
+            let title = title.to_string();
+            seg.add_command_ex(
+                label,
+                Some(Box::new(move || match video::set(feature, Level { enabled, value, auto }) {
+                    Ok(()) => crate::osd::show(Icon::Display, &format!("{title}: {label}"), None),
+                    Err(err) => show_error_box(&err),
+                })),
+                None, None, Some("pill"), true, selected == Some(i),
+            );
+        }
+    }
 }

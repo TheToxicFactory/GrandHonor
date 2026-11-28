@@ -132,8 +132,9 @@ impl ActiveScheme {
 
     /// Re-activating the active scheme makes Windows pick up the written values at once.
     /// Only ever called on the active scheme (it would switch to any other).
-    fn commit(&self) {
-        let _ = unsafe { PowerSetActiveScheme(None, Some(&self.0)) };
+    fn commit(&self) -> bool {
+        Self::get().is_some_and(|active| active.0 == self.0)
+            && unsafe { PowerSetActiveScheme(None, Some(&self.0)) }.is_ok()
     }
 }
 
@@ -183,17 +184,6 @@ fn decode(text: &str) -> Option<(String, Vec<(Option<u32>, Option<u32>)>)> {
     Some((scheme.to_string(), values))
 }
 
-fn restore_into(scheme: &ActiveScheme, values: &[(Option<u32>, Option<u32>)]) {
-    for (row, (ac, dc)) in ROWS.iter().zip(values) {
-        if let Some(v) = ac {
-            scheme.write(&row.setting, true, *v);
-        }
-        if let Some(v) = dc {
-            scheme.write(&row.setting, false, *v);
-        }
-    }
-}
-
 /// Every scheme the profiles have written into keeps its own entry, so switching schemes
 /// never loses the values of the one written before. Entries are joined with '/'.
 type Saved = Vec<(String, Vec<(Option<u32>, Option<u32>)>)>;
@@ -212,76 +202,132 @@ fn load_saved() -> Saved {
     })
 }
 
-fn store_saved(saved: &Saved) {
+fn store_saved(saved: &Saved) -> bool {
     if saved.is_empty() {
-        settings::set_cpu_profile_original(None);
-        return;
+        return settings::set_cpu_profile_original(None);
     }
     let text: Vec<String> = saved
         .iter()
         .filter_map(|(guid, values)| parse_guid(guid).map(|g| encode(&g, values)))
         .collect();
-    settings::set_cpu_profile_original(Some(&text.join("/")));
+    settings::set_cpu_profile_original(Some(&text.join("/")))
 }
 
 /// Puts back every saved scheme's own values (each written by its GUID, active or not).
-fn restore_all(saved: &Saved) {
-    for (guid, values) in saved {
-        if let Some(scheme) = ActiveScheme::open(guid) {
-            restore_into(&scheme, values);
+fn restore_all(mut saved: Saved) -> bool {
+    let active = ActiveScheme::get();
+    saved.retain(|(guid, values)| {
+        let Some(scheme) = ActiveScheme::open(guid) else { return true };
+        let mut restored = true;
+        for (row, (ac, dc)) in ROWS.iter().zip(values) {
+            for (on_ac, original) in [(true, ac), (false, dc)] {
+                if let Some(value) = original {
+                    restored &= write_and_verify(&scheme, &row.setting, on_ac, *value);
+                }
+            }
         }
+        if active.as_ref().is_some_and(|a| a.0 == scheme.0) {
+            restored &= scheme.commit();
+        }
+        !restored
+    });
+    let stored = store_saved(&saved);
+    stored && saved.is_empty()
+}
+
+fn write_and_verify(scheme: &ActiveScheme, setting: &GUID, ac: bool, value: u32) -> bool {
+    if scheme.read(setting, ac) == Some(value) {
+        return true;
     }
+    scheme.write(setting, ac, value) && scheme.read(setting, ac) == Some(value)
 }
 
 /// Writes the chosen profiles into the active scheme, or puts the scheme's own values back
-/// when neither source has one. Called after a choice in the panel and once at start (Windows
-/// updates can reset schemes). Returns false when Windows refused a write.
+/// when neither source has one. Used until the user first chooses a linked profile.
 pub fn apply() -> bool {
+    let (ac, dc) = (chosen(true), chosen(false));
+    if ac.is_none() && dc.is_none() {
+        return restore_all(load_saved());
+    }
+    apply_to_scheme([Some(ac), Some(dc)])
+}
+
+pub fn apply_for_source(ac: bool, profile: Profile) -> bool {
+    if ac {
+        apply_to_scheme([Some(Some(profile)), None])
+    } else {
+        apply_to_scheme([None, Some(Some(profile))])
+    }
+}
+
+pub fn active_scheme_id() -> Option<GUID> {
+    ActiveScheme::get().map(|scheme| scheme.0)
+}
+
+fn apply_to_scheme(profiles: [Option<Option<Profile>>; 2]) -> bool {
     let Some(scheme) = ActiveScheme::get() else { return false };
     let mut saved = load_saved();
-    // Values saved by 2.5.4 are positional: rewrite them keyed by setting at once, so a
-    // later change of `ROWS` cannot put them into the wrong settings.
-    if !saved.is_empty() && settings::cpu_profile_original().is_some_and(|t| !t.contains('=')) {
-        store_saved(&saved);
-    }
-    let (ac_profile, dc_profile) = (chosen(true), chosen(false));
-    if ac_profile.is_none() && dc_profile.is_none() {
-        restore_all(&saved);
-        // The active scheme last, so Windows re-reads it.
-        scheme.commit();
-        store_saved(&Vec::new());
-        return true;
-    }
     let key = format!("{:?}", scheme.guid());
     let originals = match saved.iter().find(|(g, _)| *g == key) {
         Some((_, values)) => values.clone(),
         None => {
             let values: Vec<_> = ROWS.iter().map(|r| (scheme.read(&r.setting, true), scheme.read(&r.setting, false))).collect();
+            if values.iter().all(|(a, d)| a.is_none() && d.is_none()) {
+                return false;
+            }
             saved.push((key, values.clone()));
-            store_saved(&saved);
             values
         }
     };
-    let mut ok = true;
+    // Persist the originals before any writes, including when converting positional backups.
+    if !store_saved(&saved) {
+        return false;
+    }
+    let mut changed = Vec::new();
+    let mut ok = [false; 2];
+    let mut failed = false;
     for (row, (orig_ac, orig_dc)) in ROWS.iter().zip(&originals) {
-        for (ac, profile, original) in [(true, ac_profile, orig_ac), (false, dc_profile, orig_dc)] {
-            // A setting the scheme lacks stays absent.
-            if original.is_none() {
-                continue;
+        for (index, original) in [orig_ac, orig_dc].into_iter().enumerate() {
+            let (Some(profile), Some(original)) = (profiles[index], original) else { continue };
+            let ac = index == 0;
+            let value = profile.map_or(*original, |p| row.value(p, ac));
+            let Some(before) = scheme.read(&row.setting, ac) else {
+                failed = true;
+                break;
+            };
+            ok[index] = true;
+            if before != value {
+                changed.push((&row.setting, ac, before));
+                if !write_and_verify(&scheme, &row.setting, ac, value) {
+                    failed = true;
+                    break;
+                }
             }
-            let value = profile.map_or(original.unwrap_or_default(), |p| row.value(p, ac));
-            ok &= scheme.write(&row.setting, ac, value);
+        }
+        if failed {
+            break;
         }
     }
-    scheme.commit();
-    ok
+    let supported = profiles.into_iter().enumerate().all(|(i, p)| p.is_none() || ok[i]);
+    if !failed && supported && (changed.is_empty() || scheme.commit()) {
+        return true;
+    }
+    for (setting, ac, before) in &changed {
+        if !write_and_verify(&scheme, setting, *ac, *before) {
+            crate::log::error(&format!("Could not roll back processor setting {setting:?}"));
+        }
+    }
+    if !changed.is_empty() && !scheme.commit() {
+        crate::log::error("Could not reactivate the power scheme after processor profile rollback");
+    }
+    false
 }
 
-/// Uninstall: put the scheme's own values back and forget the choice.
+/// Uninstall: put each scheme's own values back. Keep failed entries so it can be retried.
 pub fn restore_original() {
-    settings::set_cpu_profile(source_key(true), None);
-    settings::set_cpu_profile(source_key(false), None);
-    let _ = apply();
+    if !restore_all(load_saved()) {
+        crate::log::error("Could not restore all original processor settings");
+    }
 }
 
 #[cfg(test)]

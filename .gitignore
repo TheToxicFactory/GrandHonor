@@ -12,3 +12,10 @@
 /tests/
 /tools/
 /.claude/
+
+# Local research output
+/reports/
+/research_notes/
+*.pem
+*.pdb
+__pycache__/

@@ -1,7 +1,7 @@
 //! Drivers → Device check → SSD: the NVMe health log (log page 2) of the system disk through
 //! `IOCTL_STORAGE_QUERY_PROPERTY` (`StorageDeviceProtocolSpecificProperty`), the same data
 //! CrystalDiskInfo shows: wear, spare, temperature, data written, hours and media errors.
-//! Read only when the page is built.
+//! Read only on demand.
 
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::Storage::FileSystem::{
@@ -25,7 +25,7 @@ pub struct SsdHealth {
     /// Rated life used, percent (can exceed 100).
     pub used_percent: u8,
     pub spare_percent: u8,
-    pub temperature_c: i32,
+    pub temperature_c: Option<i32>,
     pub written_tb: f64,
     pub power_on_hours: u64,
     pub media_errors: u64,
@@ -111,7 +111,7 @@ pub fn parse_health_log(log: &[u8], model: String) -> Option<SsdHealth> {
         model,
         used_percent: log[5],
         spare_percent: log[3],
-        temperature_c: if kelvin > 0 { kelvin - 273 } else { 0 },
+        temperature_c: (kelvin > 0).then_some(kelvin - 273),
         written_tb,
         power_on_hours: u64_at(log, 128),
         media_errors: u64_at(log, 160),
@@ -123,10 +123,10 @@ pub fn parse_health_log(log: &[u8], model: String) -> Option<SsdHealth> {
 /// Cached for a minute (it opens the physical disks).
 pub fn read() -> Option<SsdHealth> {
     static CACHE: crate::cache::Ttl<Option<SsdHealth>> = crate::cache::Ttl::new(std::time::Duration::from_secs(60));
-    CACHE.get(read_now)
+    CACHE.get(read_for_check)
 }
 
-fn read_now() -> Option<SsdHealth> {
+pub(super) fn read_for_check() -> Option<SsdHealth> {
     for index in 0..4 {
         let Some(handle) = open(index) else { continue };
         let mut input = vec![0u8; 8 + SPECIFIC_DATA_SIZE + LOG_SIZE];
@@ -140,7 +140,7 @@ fn read_now() -> Option<SsdHealth> {
         // STORAGE_PROTOCOL_DATA_DESCRIPTOR: Version, Size, then the specific data (offset 8).
         let offset = 8 + u32_at(&out, 8 + 16) as usize;
         let length = u32_at(&out, 8 + 20) as usize;
-        if length < LOG_SIZE || offset + LOG_SIZE > n {
+        if offset < 8 + SPECIFIC_DATA_SIZE || length < LOG_SIZE || offset + LOG_SIZE > n {
             continue;
         }
         return parse_health_log(&out[offset..offset + LOG_SIZE], model(&handle));
@@ -161,9 +161,10 @@ mod tests {
         log[48..56].copy_from_slice(&20_000_000u64.to_le_bytes()); // 10.24 TB
         log[128..136].copy_from_slice(&1234u64.to_le_bytes());
         let h = parse_health_log(&log, "Disk".into()).unwrap();
-        assert_eq!((h.temperature_c, h.spare_percent, h.used_percent, h.power_on_hours), (40, 100, 3, 1234));
+        assert_eq!((h.temperature_c, h.spare_percent, h.used_percent, h.power_on_hours), (Some(40), 100, 3, 1234));
         assert!((h.written_tb - 10.24).abs() < 0.01);
         assert!(!h.warning && h.media_errors == 0);
+        assert_eq!(parse_health_log(&[0; LOG_SIZE], "Disk".into()).unwrap().temperature_c, None);
         assert!(parse_health_log(&log[..100], String::new()).is_none());
     }
 }

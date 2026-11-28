@@ -192,8 +192,10 @@ fn serve_ipc(
     // request is answered at once instead of after the sensor and system queries.
     // A fresh sensor sample first, so the first page shows live readings, not dashes that a
     // poll replaces half a second later.
-    let _ = crate::hw::sensors::sample_live();
-    let mut prebuilt = Some(build_panel_snapshot(&ctx));
+    let telemetry = crate::hw::sensors::sample_live();
+    let (mut snapshot, commands) = build_panel_snapshot(&ctx);
+    snapshot.telemetry = telemetry;
+    let mut prebuilt = Some((snapshot, commands));
     let mut reader = BufReader::new(stdout);
     let mut commands: HashMap<u32, ActionFn> = HashMap::new();
     let mut line = String::new();

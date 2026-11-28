@@ -2,29 +2,16 @@
 //! cool and frugal); afterwards the mode from before comes back, unless it was changed by hand
 //! during the night. One thread sleeps until the next boundary (at most an hour).
 
-use crate::hw::power::{WINDOWS_BALANCED, WINDOWS_EFFICIENCY, WINDOWS_PERFORMANCE, set_windows_power_mode, windows_power_mode};
+use super::power::{self, Profile, WINDOWS_EFFICIENCY, current_source, set_windows_mode_for_source, windows_mode_for_source};
 use crate::settings;
 use grandhonor_core::locale::t;
 use std::sync::{Condvar, Mutex, OnceLock};
 use std::time::Duration;
 use windows::Win32::System::SystemInformation::GetLocalTime;
-use windows_core::GUID;
 
 fn shared() -> &'static (Mutex<u64>, Condvar) {
     static S: OnceLock<(Mutex<u64>, Condvar)> = OnceLock::new();
     S.get_or_init(|| (Mutex::new(0), Condvar::new()))
-}
-
-fn code(mode: GUID) -> u32 {
-    if mode == WINDOWS_EFFICIENCY { 1 } else if mode == WINDOWS_PERFORMANCE { 3 } else { 2 }
-}
-
-fn mode(code: u32) -> GUID {
-    match code {
-        1 => WINDOWS_EFFICIENCY,
-        3 => WINDOWS_PERFORMANCE,
-        _ => WINDOWS_BALANCED,
-    }
 }
 
 /// Is `hour` inside [from, to), a window that may wrap past midnight (from == to: never).
@@ -61,41 +48,59 @@ pub fn poke() {
     cv.notify_all();
 }
 
-fn on_ac() -> bool {
-    crate::hw::battery_alerts::status().is_none_or(|(ac, _)| ac)
-}
-
-/// Brings the current power source in line: Efficiency inside the window (unless an app
-/// profile holds Performance), the saved mode back outside it. Windows keeps one mode per
-/// source, so each source has its own saved mode.
-fn apply() {
+pub(super) fn requested_now() -> bool {
     let (from, to) = settings::night_mode_hours();
     let hour = u32::from(unsafe { GetLocalTime() }.wHour);
-    let source = crate::presets::source_key(on_ac());
-    let want = settings::night_mode_enabled() && in_window(hour, from, to) && !crate::hw::app_profiles::active();
-    let saved = settings::night_mode_saved(source);
-    let Some(current) = windows_power_mode() else { return };
-    if want && saved.is_none() {
-        settings::set_night_mode_saved(source, Some(code(current)));
-        if current != WINDOWS_EFFICIENCY {
-            match set_windows_power_mode(WINDOWS_EFFICIENCY) {
-                Ok(()) => {
-                    let text = format!("{} {to:02}:00", t("Экономия до", "Efficiency until", "能效至"));
-                    crate::osd::notify(crate::osd::Icon::Normal, &text);
-                }
-                Err(err) => crate::log::error(&format!("Quiet nights: {err}")),
-            }
+    settings::night_mode_enabled() && in_window(hour, from, to)
+}
+
+fn apply() {
+    if power::linked() {
+        if let Some(applied) = power::reconcile(false) {
+            power::notify_applied(applied);
         }
-    } else if !want && let Some(before) = saved {
-        settings::set_night_mode_saved(source, None);
-        // Changed by hand during the night: leave the person's choice alone.
-        if current == WINDOWS_EFFICIENCY
-            && before != 1
-            && let Err(err) = set_windows_power_mode(mode(before))
-        {
-            crate::log::error(&format!("Quiet nights restore: {err}"));
+    } else {
+        let _ = power::if_legacy(apply_legacy);
+    }
+}
+
+/// Existing configurations retain the Windows-only behavior until their first linked choice.
+fn apply_legacy() {
+    let Some(ac) = current_source() else { return };
+    let want = requested_now() && !crate::hw::app_profiles::active();
+    if !want {
+        for source in [true, false] {
+            restore_legacy(source);
+        }
+        return;
+    }
+    let source = crate::presets::source_key(ac);
+    let saved = settings::night_mode_saved(source);
+    let Some(current) = windows_mode_for_source(ac) else { return };
+    if saved.is_none() && current != WINDOWS_EFFICIENCY {
+        match set_windows_mode_for_source(ac, WINDOWS_EFFICIENCY) {
+            Ok(()) => {
+                settings::set_night_mode_saved(source, Some(Profile::from_windows_mode(current) as u32));
+                let (_, to) = settings::night_mode_hours();
+                let text = format!("{} {to:02}:00", t("Экономия до", "Efficiency until", "能效至"));
+                crate::osd::notify(crate::osd::Icon::Normal, &text);
+            }
+            Err(err) => crate::log::error(&format!("Quiet nights: {err}")),
         }
     }
+}
+
+fn restore_legacy(ac: bool) {
+    let source = crate::presets::source_key(ac);
+    let Some(before) = settings::night_mode_saved(source).and_then(Profile::from_code) else { return };
+    let Some(current) = windows_mode_for_source(ac) else { return };
+    if current == WINDOWS_EFFICIENCY
+        && let Err(err) = set_windows_mode_for_source(ac, before.windows_mode())
+    {
+        crate::log::error(&format!("Quiet nights restore: {err}"));
+        return;
+    }
+    settings::set_night_mode_saved(source, None);
 }
 
 fn run() {
@@ -103,9 +108,9 @@ fn run() {
     let mut seen = 0;
     loop {
         apply();
-        let busy = settings::night_mode_enabled()
-            || settings::night_mode_saved("Ac").is_some()
-            || settings::night_mode_saved("Dc").is_some();
+        let busy = settings::night_mode_enabled() || !power::linked() && (
+            settings::night_mode_saved("Ac").is_some() || settings::night_mode_saved("Dc").is_some()
+        );
         let Ok(guard) = lock.lock() else { return };
         let guard = if busy {
             // Until the next boundary (at most an hour, so a changed clock is caught too).
